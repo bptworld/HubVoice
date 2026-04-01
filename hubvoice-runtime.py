@@ -180,6 +180,7 @@ SATELLITE_CAP_CACHE_TTL = 30.0  # seconds
 HUBITAT_REQUEST_TIMEOUT = 20  # seconds
 SATELLITE_MEDIA_DELAY = 0.3  # seconds
 RECONNECT_DELAY = 2  # seconds
+VOICE_BRIDGE_CONNECT_TIMEOUT = 3.0  # seconds
 TTS_PRESTOP_CONNECT_TIMEOUT = 1.5  # seconds
 TTS_PRESTOP_ENTITY_TIMEOUT = 1.0  # seconds
 SATELLITE_NUMBER_MAX_RETRIES = 2
@@ -4290,6 +4291,15 @@ def get_whisper_model() -> WhisperModel:
         return _WHISPER_MODEL
 
 
+def preload_whisper_model() -> None:
+    """Warm-load Whisper model so first STT call does not incur startup latency."""
+    try:
+        get_whisper_model()
+        logging.info("Whisper model preloaded for fast STT")
+    except Exception as exc:
+        logging.warning("Whisper preload skipped: %s", exc)
+
+
 def clean_transcript(text: str) -> str:
     cleaned = sanitize_text(text).strip(" .?!,;:")
     for prefix in ("hey jarvis ", "jarvis ", "hey jervis ", "okay nabu ", "ok nabu ", "stop "):
@@ -5199,6 +5209,19 @@ def parse_directed_send(text: str) -> dict | None:
 
 
 def transcribe_wav(wav_path: Path, *, initial_prompt: str | None = None, beam_size: int = 5, best_of: int = 5) -> dict:
+    config = load_config()
+
+    def _cfg_int(name: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(config.get(name, default))
+        except Exception:
+            value = default
+        return max(minimum, min(maximum, value))
+
+    # Global VAD trimming defaults tuned for faster response while keeping short pauses intact.
+    vad_min_silence_ms = _cfg_int("stt_vad_min_silence_ms", 500, 100, 3000)
+    vad_speech_pad_ms = _cfg_int("stt_vad_speech_pad_ms", 120, 0, 1000)
+
     model = get_whisper_model()
     segments, info = model.transcribe(
         str(wav_path),
@@ -5206,6 +5229,10 @@ def transcribe_wav(wav_path: Path, *, initial_prompt: str | None = None, beam_si
         beam_size=beam_size,
         best_of=best_of,
         vad_filter=True,
+        vad_parameters={
+            "min_silence_duration_ms": vad_min_silence_ms,
+            "speech_pad_ms": vad_speech_pad_ms,
+        },
         condition_on_previous_text=False,
         initial_prompt=initial_prompt,
     )
@@ -5327,68 +5354,71 @@ def ask_hubitat(question: str, sat_id: str) -> dict:
     }
 
 
-def should_retry_transcript(transcript: dict, hubitat_result: dict) -> bool:
+def should_retry_transcript(transcript: dict, *, logprob_threshold: float = -0.95) -> bool:
     text = str(transcript.get("text", "")).strip()
     avg_logprob = transcript.get("avg_logprob")
-    payload = hubitat_result.get("payload") or {}
-    answer = str(hubitat_result.get("answer", "")).lower()
-    error = str(payload.get("error", "")).lower()
 
     if not text:
         return True
-    if avg_logprob is not None and float(avg_logprob) < -0.75:
+    if avg_logprob is not None and float(avg_logprob) < float(logprob_threshold):
         return True
-    if not hubitat_result.get("ok"):
-        if error in {"no_device", "unknown_intent"}:
-            return True
-        if "didn't understand" in answer or "did not understand" in answer:
-            return True
     return False
 
 
 def transcribe_with_retry(wav_path: Path, sat_id: str) -> dict:
-    primary = transcribe_wav(wav_path, beam_size=5, best_of=5)
-    logging.info("Primary transcript: %r (avg_logprob=%s)", primary["text"], primary["avg_logprob"])
+    config = load_config()
+    speed_mode_raw = str(config.get("stt_speed_mode", "true")).strip().lower()
+    speed_mode = speed_mode_raw not in {"0", "false", "off", "no"}
 
-    if not primary["text"]:
-        retry = transcribe_wav(
-            wav_path,
-            initial_prompt="Home automation voice query. Examples: Is the front door open? Which lights are on? House status. Security check. What is the temperature in the kitchen?",
-            beam_size=8,
-            best_of=8,
-        )
-        logging.info("Retry transcript after empty result: %r (avg_logprob=%s)", retry["text"], retry["avg_logprob"])
-        return retry
+    def _cfg_int(name: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(config.get(name, default))
+        except Exception:
+            value = default
+        return max(minimum, min(maximum, value))
+
+    def _cfg_float(name: str, default: float, minimum: float, maximum: float) -> float:
+        try:
+            value = float(config.get(name, default))
+        except Exception:
+            value = default
+        return max(minimum, min(maximum, value))
+
+    primary_beam = _cfg_int("stt_primary_beam", 2 if speed_mode else 5, 1, 10)
+    primary_best = _cfg_int("stt_primary_best_of", 2 if speed_mode else 5, 1, 10)
+    retry_beam = _cfg_int("stt_retry_beam", 4 if speed_mode else 8, 1, 12)
+    retry_best = _cfg_int("stt_retry_best_of", 4 if speed_mode else 8, 1, 12)
+    retry_logprob_threshold = _cfg_float("stt_retry_logprob_threshold", -0.95 if speed_mode else -0.75, -2.0, 0.0)
+    improvement_threshold = _cfg_float("stt_retry_improvement_threshold", 0.08 if speed_mode else 0.05, 0.0, 1.0)
+
+    primary = transcribe_wav(wav_path, beam_size=primary_beam, best_of=primary_best)
+    logging.info("Primary transcript: %r (avg_logprob=%s)", primary["text"], primary["avg_logprob"])
 
     if parse_volume_command(primary["text"]):
         return primary
 
-    first_answer = ask_hubitat(primary["text"], sat_id)
-    if not should_retry_transcript(primary, first_answer):
-        primary["hubitat"] = first_answer
+    if not should_retry_transcript(primary, logprob_threshold=retry_logprob_threshold):
         return primary
 
     retry = transcribe_wav(
         wav_path,
         initial_prompt="Home automation voice query. Devices may be doors, locks, lights, motion sensors, thermostats, batteries, house status, security check, hub mode, windows, water sensors.",
-        beam_size=8,
-        best_of=8,
+        beam_size=retry_beam,
+        best_of=retry_best,
     )
     logging.info("Retry transcript: %r (avg_logprob=%s)", retry["text"], retry["avg_logprob"])
+
+    if not retry["text"]:
+        return primary
+
     if parse_volume_command(retry["text"]):
         return retry
-    retry_answer = ask_hubitat(retry["text"], sat_id) if retry["text"] else {"ok": False, "answer": "", "payload": {}}
-    retry["hubitat"] = retry_answer
 
-    if retry_answer.get("ok") and not first_answer.get("ok"):
+    retry_score = float(retry.get("avg_logprob") or -99.0)
+    first_score = float(primary.get("avg_logprob") or -99.0)
+    if retry_score > first_score + improvement_threshold:
         return retry
-    if retry_answer.get("ok") == first_answer.get("ok"):
-        retry_score = float(retry.get("avg_logprob") or -99.0)
-        first_score = float(primary.get("avg_logprob") or -99.0)
-        if retry_score > first_score + 0.05:
-            return retry
 
-    primary["hubitat"] = first_answer
     return primary
 
 
@@ -8044,7 +8074,10 @@ class VoiceAssistantBridge:
             client = APIClient(satellite["host"], 6054, None, client_info="HubVoiceSatRuntime")
             try:
                 self._set_state(status="connecting", connected=False, error="", event="connecting")
-                await client.connect(login=False, on_stop=self._on_disconnect)
+                await asyncio.wait_for(
+                    client.connect(login=False, on_stop=self._on_disconnect),
+                    timeout=VOICE_BRIDGE_CONNECT_TIMEOUT,
+                )
                 with self._lock:
                     self._client = client
                 self._unsubscribe = client.subscribe_voice_assistant(
@@ -8101,8 +8134,13 @@ class VoiceAssistantBridge:
             client = self._client
         if client is None:
             return
-        client.send_voice_assistant_event(event_type, data)
-        self._set_state(event=event_type.name)
+        try:
+            client.send_voice_assistant_event(event_type, data)
+            self._set_state(event=event_type.name)
+        except Exception as exc:
+            # Do not let transient bridge send failures stall voice processing.
+            logging.warning("Failed to send VA event %s: %s", event_type.name, exc)
+            self._set_state(connected=False, error=str(exc), event="event_send_failed")
 
     def send_timer_event(
         self,
@@ -10915,6 +10953,8 @@ def main() -> None:
     threading.Thread(target=worker_loop, daemon=True).start()
     # Warm-load Piper in the background to reduce first text-to-speech latency.
     threading.Thread(target=preload_piper_voice_model, daemon=True).start()
+    # Warm-load Whisper in the background to reduce first speech-to-text latency.
+    threading.Thread(target=preload_whisper_model, daemon=True).start()
     
     # Start voice assistant bridges (one per satellite)
     for _bridge in _VOICE_BRIDGES.values():

@@ -17,6 +17,7 @@
 /__pycache__/
 /hubvoice-sat-setup.json
 *.pyc
+*.log
 
 # IDE and local helper caches
 /.vscode/

@@ -4,7 +4,7 @@ param(
 )
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$venvScripts = Join-Path $repoRoot ".runtime-venv\Scripts"
+$venvScripts = Join-Path $repoRoot ".envs\runtime\Scripts"
 $esphomeExe = Join-Path $venvScripts "esphome.exe"
 $platformioExe = Join-Path $venvScripts "platformio.exe"
 $patchScript = Join-Path $repoRoot "patch-generated-web-ui.ps1"

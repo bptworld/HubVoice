@@ -126,7 +126,7 @@ function Stop-LauncherProcesses {
 function Stop-SetupWebProcesses {
   $stopped = New-Object System.Collections.Generic.HashSet[int]
 
-  # Stop ALL setup-web.ps1 processes (any path — includes AppData-installed copies).
+  # Stop ALL setup-web.ps1 processes (any path â€” includes AppData-installed copies).
   try {
     $setupProcesses = Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'pwsh.exe'"
     foreach ($proc in $setupProcesses) {
@@ -1217,10 +1217,10 @@ $html = @'
 '@
 
 function Start-RuntimeIfNeeded {
-  $runtimeVenvPythonw = Join-Path $root ".runtime-venv\Scripts\pythonw.exe"
-  $runtimeVenvPython = Join-Path $root ".runtime-venv\Scripts\python.exe"
-  $venvPythonw = Join-Path $root ".venv\Scripts\pythonw.exe"
-  $venvPython = Join-Path $root ".venv\Scripts\python.exe"
+  $runtimeVenvPythonw = Join-Path $root ".envs\runtime\Scripts\pythonw.exe"
+  $runtimeVenvPython = Join-Path $root ".envs\runtime\Scripts\python.exe"
+  $venvPythonw = Join-Path $root ".envs\main\Scripts\pythonw.exe"
+  $venvPython = Join-Path $root ".envs\main\Scripts\python.exe"
   $runtimeScript = Join-Path $root "hubvoice-runtime.py"
   $pythonExe = $null
   

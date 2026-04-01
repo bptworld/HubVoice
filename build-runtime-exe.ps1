@@ -4,8 +4,8 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $runtimeScript = Join-Path $repoRoot "hubvoice-runtime.py"
-$runtimeVenvPython = Join-Path $repoRoot ".runtime-venv\Scripts\python.exe"
-$fallbackPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
+$runtimeVenvPython = Join-Path $repoRoot ".envs\runtime\Scripts\python.exe"
+$fallbackPython = Join-Path $repoRoot ".envs\main\Scripts\python.exe"
 $outputPath = Join-Path $repoRoot "build\HubVoiceRuntime"
 $workPath = Join-Path $repoRoot "build\HubVoiceRuntime-work"
 $specPath = Join-Path $repoRoot "build\HubVoiceRuntime-spec"

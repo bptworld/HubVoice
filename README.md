@@ -10,6 +10,7 @@ Files:
 - `build-setup-launcher.ps1`: publishes the Windows setup launcher exe and refreshes the repo-root exe
 - `flash.bat`: simple Windows wrapper for config / compile / flash commands
 - `HubVoiceSatSetup.exe`: single Windows launcher exe that self-stages the setup payload and opens the local setup page
+- `.envs\`: local virtual environments (`main`, `runtime`, `airplay`) used by build/runtime scripts
 - `setup-web.ps1`: setup page/service payload embedded into the launcher
 - `build\HubVoiceSatSetup\HubVoiceSatSetup.exe`: published Windows launcher exe
 - `patch.exe` / `patch.cmd` / `patch-wrapper.ps1`: local Windows patch shim so `micro-opus` can build without Git installed

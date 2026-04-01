@@ -1,7 +1,7 @@
 @echo off
 setlocal
 set "ROOT=%~dp0"
-set "ESPHOME=%ROOT%.runtime-venv\Scripts\esphome.exe"
+set "ESPHOME=%ROOT%.envs\runtime\Scripts\esphome.exe"
 
 if not exist "%ESPHOME%" (
   echo ESPHome is not installed in this repo at "%ESPHOME%"

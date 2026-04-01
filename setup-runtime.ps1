@@ -5,7 +5,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$venvDir = Join-Path $root ".runtime-venv"
+$venvDir = Join-Path $root ".envs\runtime"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 $venvPip = Join-Path $venvDir "Scripts\pip.exe"
 $requirementsPath = Join-Path $root "requirements-runtime.txt"
@@ -52,7 +52,7 @@ if ($Force -and (Test-Path $venvDir)) {
 
 if (-not (Test-Path $venvPython)) {
   Write-Host ""
-  Write-Host "Creating virtual environment at .runtime-venv ..."
+  Write-Host "Creating virtual environment at .envs\\runtime ..."
   & $pythonCmd -m venv $venvDir
   if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Failed to create virtual environment."
@@ -69,7 +69,7 @@ Write-Host ""
 Write-Host "Upgrading pip..."
 & $venvPython -m pip install --upgrade pip --quiet
 if ($LASTEXITCODE -ne 0) {
-  Write-Host "WARN: pip upgrade failed — continuing anyway."
+  Write-Host "WARN: pip upgrade failed â€” continuing anyway."
 }
 
 # --- Install runtime packages ---
@@ -115,7 +115,7 @@ if ($allOk) {
   Write-Host "Next steps:"
   Write-Host "  1. Make sure piper_voices\ contains a .onnx voice model"
   Write-Host "  2. Configure hubvoice-sat-setup.json (or run HubVoiceSatSetup.exe)"
-  Write-Host "  3. Start the runtime: .runtime-venv\Scripts\python.exe hubvoice-runtime.py"
+  Write-Host "  3. Start the runtime: .envs\\runtime\\Scripts\\python.exe hubvoice-runtime.py"
 } else {
   Write-Host "One or more packages failed to import. See errors above."
   exit 1

@@ -2,8 +2,8 @@
 setlocal
 
 set "ROOT=%~dp0"
-set "ESPHOME=%ROOT%.runtime-venv\Scripts\esphome.exe"
-set "PATH=%ROOT%.runtime-venv\Scripts;%ROOT%;%PATH%"
+set "ESPHOME=%ROOT%.envs\runtime\Scripts\esphome.exe"
+set "PATH=%ROOT%.envs\runtime\Scripts;%ROOT%;%PATH%"
 for /f "tokens=1,* delims=:" %%A in ('findstr /b /c:"  firmware_version:" "%ROOT%hubvoice-sat.yaml"') do if not defined FW_VERSION set "FW_VERSION=%%B"
 for /f "tokens=1,* delims=:" %%A in ('findstr /b /c:"  device_name:" "%ROOT%hubvoice-sat.yaml"') do if not defined DEVICE_NAME set "DEVICE_NAME=%%B"
 for /f "tokens=1,* delims=:" %%A in ('findstr /b /c:"  friendly_name:" "%ROOT%hubvoice-sat.yaml"') do if not defined FRIENDLY_NAME set "FRIENDLY_NAME=%%B"
@@ -22,7 +22,7 @@ if not exist "%ESPHOME%" (
   echo ESPHome is not installed in this repo at "%ESPHOME%"
   echo.
   echo Run this once from C:\HubVoiceSat:
-  echo   .\.runtime-venv\Scripts\python.exe -m pip install esphome==2026.2.4
+  echo   .\.envs\runtime\Scripts\python.exe -m pip install esphome==2026.2.4
   echo.
   pause
   exit /b 1

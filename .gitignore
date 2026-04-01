@@ -4,6 +4,7 @@
 /.esphome/
 /secrets.yaml
 /.venv/
+/.envs/
 /.runtime-venv/
 /build/
 /dist/
@@ -22,6 +23,7 @@
 # IDE and local helper caches
 /.vscode/
 /.tmp-pkg-meta/
+/_local_artifacts/
 
 # .NET build outputs
 **/bin/

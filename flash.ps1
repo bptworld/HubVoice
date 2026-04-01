@@ -12,7 +12,7 @@ param(
 )
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$EsphomeVenv = Join-Path $Root ".runtime-venv\Scripts\esphome.exe"
+$EsphomeVenv = Join-Path $Root ".envs\runtime\Scripts\esphome.exe"
 $SatellitesCSV = Join-Path $Root "satellites.csv"
 
 # Select YAML based on hardware model
@@ -37,7 +37,7 @@ Write-Host "Using config: $($YamlMap[$YamlKey])"
 # Check ESPHome installed
 if (-not (Test-Path $EsphomeVenv)) {
     Write-Host "ESPHome is not installed. Run:"
-    Write-Host "  .\.runtime-venv\Scripts\python.exe -m pip install esphome==2026.2.4"
+    Write-Host "  .\.envs\runtime\Scripts\python.exe -m pip install esphome==2026.2.4"
     [Environment]::Exit(1)
 }
 

@@ -15,12 +15,12 @@ Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
 Start-Sleep -Milliseconds 800
 
 $pythonCandidates = @(
-    (Join-Path $root '.runtime-venv\Scripts\python.exe'),
-    (Join-Path $root '.venv\Scripts\python.exe')
+    (Join-Path $root '.envs\runtime\Scripts\python.exe'),
+    (Join-Path $root '.envs\main\Scripts\python.exe')
 )
 $pythonExe = $pythonCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $pythonExe) {
-    throw "Unable to find python.exe in .runtime-venv or .venv under $root"
+    throw "Unable to find python.exe in .envs/runtime or .envs/main under $root"
 }
 
 $env:PYTHONUNBUFFERED = '1'

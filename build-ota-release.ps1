@@ -3,7 +3,7 @@ param()
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$venvScripts = Join-Path $repoRoot ".runtime-venv\Scripts"
+$venvScripts = Join-Path $repoRoot ".envs\runtime\Scripts"
 $esphomeExe = Join-Path $venvScripts "esphome.exe"
 $buildScript = Join-Path $repoRoot "build-hubvoice-sat.ps1"
 $setupProject = Join-Path $repoRoot "setup-launcher\HubVoiceSatSetup.csproj"
@@ -244,7 +244,7 @@ HubVoiceSat Release Package
 ===========================
 
 Files in this folder:
-- HubVoiceSatSetup.exe         Windows setup app — launches setup page, starts runtime, lives in system tray
+- HubVoiceSatSetup.exe         Windows setup app â€” launches setup page, starts runtime, lives in system tray
 - HubVoiceSat.exe              Primary launcher name (same app as HubVoiceSatSetup.exe)
 - HubVoiceRuntime.exe          Standalone runtime (Python bundled, no separate install required)
 - satellites.csv               Satellite list (starts empty; fill in Setup)
@@ -258,7 +258,7 @@ Files in this folder:
 
 FIRST-TIME SETUP
 ================
-Step 1 — Flash the satellite (one time per device):
+Step 1 â€” Flash the satellite (one time per device):
   a. Connect the satellite by USB.
   b. Run open-usb-flash-page.bat.
   c. In ESP Web Tools, connect to the satellite and choose:
@@ -269,7 +269,7 @@ Step 1 — Flash the satellite (one time per device):
   e. Open http://<satellite-ip>:8080/ and set Satellite Name
      to something like Living Room, Kitchen, or Office.
 
-Step 2 — Configure and launch:
+Step 2 â€” Configure and launch:
   Run HubVoiceSat.exe (or HubVoiceSatSetup.exe). It will:
   - Start HubVoiceRuntime.exe automatically
   - Open the setup page in your browser

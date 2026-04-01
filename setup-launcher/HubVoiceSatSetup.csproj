@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>HubVoiceSatSetup</AssemblyName>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\setup-web.ps1">
+      <LogicalName>Payload/setup-web.ps1</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\build-ota-release.ps1">
+      <LogicalName>Payload/build-ota-release.ps1</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\hubvoice-sat.yaml">
+      <LogicalName>Payload/hubvoice-sat.yaml</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\hubvoice-sat-setup.json">
+      <LogicalName>Payload/hubvoice-sat-setup.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\secrets.yaml">
+      <LogicalName>Payload/secrets.yaml</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\satellites.csv">
+      <LogicalName>Payload/satellites.csv</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\piper_voices\**\*">
+      <LogicalName>Payload/piper_voices/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>

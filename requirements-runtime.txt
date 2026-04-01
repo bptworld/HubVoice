@@ -1,0 +1,37 @@
+# HubVoice Runtime — Python package requirements
+# Install with:  pip install -r requirements-runtime.txt
+#
+# These are the packages required to run hubvoice-runtime.py.
+# ESPHome / PlatformIO / firmware build tools are NOT listed here —
+# those are only needed when building firmware (developer workflow).
+
+# Core: satellite communication via ESPHome API
+aioesphomeapi>=44.0.0
+
+# Core: local speech recognition (CPU mode works; GPU/CUDA gives much faster results)
+faster-whisper>=1.2.1
+
+# Core: text-to-speech synthesis (requires a .onnx voice model in piper_voices/)
+piper-tts>=1.4.1
+
+# HubMusic: desktop audio relay (Pandora/Spotify/YouTube → satellites)
+# av encodes the captured audio to MP3 for the satellite media player
+av>=13.0.0
+
+# HubMusic: audio processing and capture
+numpy>=1.26.0
+sounddevice>=0.4.7
+
+# Optional: iPhone AirPlay receiver support for HubMusic phone streaming
+# Note: use netifaces2 on modern Python; it installs as module name 'netifaces'.
+netifaces2>=0.0.22
+zeroconf>=0.148.0
+biplist>=1.0.3
+pycryptodome>=3.23.0
+hexdump>=3.3
+srptools>=1.0.1
+hkdf>=0.0.3
+pyaudio>=0.2.14
+
+# Optional: built-in DLNA/UPnP MediaRenderer for Android-friendly phone streaming
+async-upnp-client>=0.46.2

@@ -1,0 +1,34 @@
+# Gitignore settings for ESPHome
+# This is an example and may include too much for your use-case.
+# You can modify this file to suit your needs.
+/.esphome/
+/secrets.yaml
+/.venv/
+/.runtime-venv/
+/build/
+/dist/
+/recordings/
+/logs/
+/releases/
+/publish/
+/tts_cache/
+/installer_state.json
+/hubvoice-runtime.lock
+/__pycache__/
+/hubvoice-sat-setup.json
+*.pyc
+
+# IDE and local helper caches
+/.vscode/
+/.tmp-pkg-meta/
+
+# .NET build outputs
+**/bin/
+**/obj/
+
+# Generated binaries and packages
+*.dll
+*.exe
+*.pdb
+*.zip
+*.pkg

@@ -1,0 +1,1247 @@
+﻿substitutions:
+  # ============================================================================
+  # VOICE ASSISTANT PHASE IDENTIFIERS
+  # ============================================================================
+  voice_assist_idle_phase_id: '1'
+  voice_assist_waiting_for_command_phase_id: '2'
+  voice_assist_listening_for_command_phase_id: '3'
+  voice_assist_thinking_phase_id: '4'
+  voice_assist_replying_phase_id: '5'
+  voice_assist_not_ready_phase_id: '10'
+  voice_assist_error_phase_id: '11'
+
+  # ============================================================================
+  # DEVICE IDENTIFICATION & FIRMWARE
+  # ============================================================================
+  hidden_ssid: "false"
+  device_name: "hubvoice-sat"
+  friendly_name: "HubVoiceSat"
+  firmware_version: "2026.03.31.6"
+
+  # ============================================================================
+  # AUDIO FILES
+  # ============================================================================
+  timer_finished_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+  wake_word_triggered_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/wake_word_triggered.flac
+  center_button_press_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_press.flac
+  center_button_double_press_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_double_press.flac
+  center_button_triple_press_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_triple_press.flac
+  center_button_long_press_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_long_press.flac
+  factory_reset_initiated_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/factory_reset_initiated.mp3
+  factory_reset_cancelled_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/factory_reset_cancelled.mp3
+  factory_reset_confirmed_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/factory_reset_confirmed.mp3
+  easter_egg_tick_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/easter_egg_tick.mp3
+  easter_egg_tada_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/easter_egg_tada.mp3
+  error_cloud_expired_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/error_cloud_expired.mp3
+
+  # ============================================================================
+  # ADVANCED CONFIGURATION
+  # ============================================================================
+  esphome_api_port: "6054"
+  http_server_port: "8080"
+  speaker_volume_min: "40"
+  speaker_volume_initial: "65"
+  speaker_volume_max: "85"
+  wake_volume_min: "40"
+  wake_volume_initial: "65"
+  wake_volume_max: "85"
+  audio_decibel_reduction: "20"
+  whisper_volume_pct: "20"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: true
+  min_version: 2026.2.0
+  project:
+    name: bptwo.hubvoice_sat_echos3r
+    version: ${firmware_version}
+  on_boot:
+    priority: 375
+    then:
+      - script.execute: control_leds
+      - delay: 1s
+      - switch.turn_on: internal_speaker_amp
+      - lambda: |-
+          id(external_media_player)
+            ->make_call()
+            .set_volume(id(speaker_volume).state / 100.0f)
+            .perform();
+      - delay: 45s
+      - if:
+          condition:
+            lambda: return id(init_in_progress);
+          then:
+            - lambda: id(init_in_progress) = false;
+            - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+            - script.execute: configure_selected_wake_word
+            - micro_wake_word.start:
+            - script.execute: control_leds
+      - component.update: effective_satellite_name
+      - component.update: firmware_version_text
+
+esp32:
+  # M5Stack Atom EchoS3R: ESP32-S3-PICO-1-N8R8 (8MB flash, 8MB octal PSRAM)
+  variant: esp32s3
+  flash_size: 8MB
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+    version: recommended
+    sdkconfig_options:
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+      CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST: "y"
+      CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY: "y"
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
+      CONFIG_MBEDTLS_SSL_PROTO_TLS1_3: "y"
+
+wifi:
+  id: wifi_id
+  fast_connect: ${hidden_ssid}
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Setup"
+    password: "hubvoicesat123"
+  on_connect:
+    - lambda: id(improv_ble_in_progress) = false;
+    - if:
+        condition:
+          lambda: return id(init_in_progress);
+        then:
+          - lambda: id(init_in_progress) = false;
+          - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - script.execute: configure_selected_wake_word
+    - micro_wake_word.start:
+    - script.execute: control_leds
+  on_disconnect:
+    - micro_wake_word.stop:
+    - script.execute: control_leds
+
+network:
+  enable_ipv6: true
+
+logger:
+  level: INFO
+  logs:
+    micro_wake_word: INFO
+    sensor: WARN
+
+api:
+  id: api_id
+  port: ${esphome_api_port}
+  on_client_connected:
+    - script.execute: control_leds
+  on_client_disconnected:
+    - script.execute: control_leds
+  encryption:
+
+ota:
+  - platform: web_server
+    on_begin:
+      - if:
+          condition:
+            voice_assistant.is_running:
+          then:
+            - voice_assistant.stop:
+      - micro_wake_word.stop:
+    on_error:
+      - script.execute: configure_selected_wake_word
+      - micro_wake_word.start:
+      - script.execute: control_leds
+    on_abort:
+      - script.execute: configure_selected_wake_word
+      - micro_wake_word.start:
+      - script.execute: control_leds
+  - platform: esphome
+    id: ota_esphome
+    on_begin:
+      - if:
+          condition:
+            voice_assistant.is_running:
+          then:
+            - voice_assistant.stop:
+      - micro_wake_word.stop:
+    on_error:
+      - script.execute: configure_selected_wake_word
+      - micro_wake_word.start:
+      - script.execute: control_leds
+    on_abort:
+      - script.execute: configure_selected_wake_word
+      - micro_wake_word.start:
+      - script.execute: control_leds
+
+web_server:
+  port: ${http_server_port}
+  js_include: web-ui-custom.js
+
+captive_portal:
+
+text:
+  - platform: template
+    id: satellite_name
+    name: "Satellite Name"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    mode: text
+    min_length: 0
+    max_length: 32
+    entity_category: config
+    set_action:
+      - lambda: id(satellite_name).publish_state(x);
+      - component.update: effective_satellite_name
+
+text_sensor:
+  - platform: template
+    id: effective_satellite_name
+    name: "Effective Satellite Name"
+    internal: true
+    entity_category: diagnostic
+    lambda: |-
+      if (!id(satellite_name).state.empty()) {
+        return id(satellite_name).state;
+      }
+      return App.get_name();
+    update_interval: never
+  - platform: template
+    id: firmware_version_text
+    name: "Version"
+    entity_category: diagnostic
+    lambda: |-
+      return {"${firmware_version}"};
+    update_interval: never
+
+number:
+  - platform: template
+    id: speaker_volume
+    name: "Speaker Volume"
+    optimistic: true
+    restore_value: true
+    initial_value: ${speaker_volume_initial}
+    min_value: ${speaker_volume_min}
+    max_value: ${speaker_volume_max}
+    step: 1
+    mode: slider
+    entity_category: config
+    set_action:
+      - lambda: |-
+          id(external_media_player)
+            ->make_call()
+            .set_volume(x / 100.0f)
+            .perform();
+
+  - platform: template
+    id: wake_sound_volume
+    name: "Wake Sound Volume"
+    optimistic: true
+    restore_value: true
+    initial_value: ${wake_volume_initial}
+    min_value: ${wake_volume_min}
+    max_value: ${wake_volume_max}
+    step: 1
+    mode: slider
+    entity_category: config
+
+  - platform: template
+    id: follow_up_listen_window_seconds
+    name: "Follow-up listen window (seconds)"
+    optimistic: true
+    restore_value: true
+    initial_value: 2
+    min_value: 1
+    max_value: 30
+    step: 1
+    mode: box
+    entity_category: config
+
+
+psram:
+  mode: octal
+  speed: 80MHz
+  ignore_not_found: false
+
+globals:
+  - id: init_in_progress
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  - id: improv_ble_in_progress
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: voice_assistant_phase
+    type: int
+    restore_value: no
+    initial_value: ${voice_assist_not_ready_phase_id}
+  - id: ptt_button_hold_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: first_active_timer
+    type: voice_assistant::Timer
+    restore_value: false
+  - id: is_timer_active
+    type: bool
+    restore_value: false
+  - id: factory_reset_requested
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: follow_up_armed
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: follow_up_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: follow_up_enabled
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+  - id: whisper_mode_active
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+
+switch:
+  - platform: template
+    id: follow_up_listening_switch
+    name: "Follow Up Listening"
+    icon: "mdi:account-voice"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    lambda: |-
+      return id(follow_up_enabled);
+    turn_on_action:
+      - lambda: id(follow_up_enabled) = true;
+      - script.execute: control_leds
+    turn_off_action:
+      - lambda: id(follow_up_enabled) = false;
+      - lambda: id(follow_up_armed) = false;
+      - script.execute: control_leds
+
+  - platform: template
+    id: whisper_mode
+    name: "Whisper Mode"
+    icon: "mdi:volume-low"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - lambda: id(whisper_mode_active) = true;
+      - script.execute: control_leds
+    on_turn_off:
+      - lambda: id(whisper_mode_active) = false;
+      - lambda: |-
+          id(external_media_player)
+            ->make_call()
+            .set_volume(id(speaker_volume).state / 100.0f)
+            .perform();
+      - script.execute: control_leds
+
+  # Software-only mute (no hardware mute switch on Atom EchoS3R)
+  - platform: template
+    id: master_mute_switch
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:microphone-off"
+    name: Mute
+    entity_category: config
+    lambda: |-
+      return id(i2s_mics).get_mute_state();
+    turn_on_action:
+      - microphone.mute:
+    turn_off_action:
+      - microphone.unmute:
+    on_turn_on:
+      - script.execute: control_leds
+    on_turn_off:
+      - script.execute: control_leds
+
+  - platform: template
+    id: wake_sound
+    name: Wake sound
+    icon: "mdi:bullhorn"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    id: timer_ringing
+    optimistic: true
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+      - micro_wake_word.disable_model: stop
+      - script.execute: disable_repeat
+      - if:
+          condition:
+            media_player.is_announcing:
+              id: external_media_player
+          then:
+            media_player.stop:
+              announcement: true
+              id: external_media_player
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 0
+          duration: 1.0s
+      - script.execute: control_leds
+    on_turn_on:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: ${audio_decibel_reduction}
+          duration: 0.0s
+      - micro_wake_word.enable_model: stop
+      - script.execute: ring_timer
+      - script.execute: control_leds
+      - delay: 15min
+      - switch.turn_off: timer_ringing
+
+  # Speaker amplifier enable (GPIO18 on Atom EchoS3R)
+  - platform: gpio
+    pin: GPIO18
+    id: internal_speaker_amp
+    name: "Internal speaker amp"
+    entity_category: config
+    restore_mode: RESTORE_DEFAULT_ON
+    internal: true
+
+binary_sensor:
+  # Single button on GPIO41 (Atom EchoS3R)
+  - platform: gpio
+    id: center_button
+    pin:
+      number: GPIO41
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      - if:
+          condition:
+            lambda: return !id(init_in_progress);
+          then:
+            - lambda: id(ptt_button_hold_active) = true;
+            - if:
+                condition:
+                  switch.is_on: timer_ringing
+                then:
+                  - switch.turn_off: timer_ringing
+                else:
+                  - if:
+                      condition:
+                        and:
+                          - switch.is_off: master_mute_switch
+                          - not: voice_assistant.is_running
+                      then:
+                        - script.execute:
+                            id: play_sound
+                            priority: true
+                            sound_file: "center_button_press_sound"
+                        - delay: 300ms
+                        - voice_assistant.start:
+                            silence_detection: false
+      - script.execute: control_leds
+    on_release:
+      - lambda: id(ptt_button_hold_active) = false;
+      - if:
+          condition:
+            voice_assistant.is_running:
+          then:
+            - voice_assistant.stop:
+      - script.execute: control_leds
+      - if:
+          condition:
+            lambda: return id(factory_reset_requested);
+          then:
+            - button.press: factory_reset_button
+    on_multi_click:
+      # Double Click
+      - timing:
+          - ON for at most 1s
+          - OFF for at most 0.25s
+          - ON for at most 1s
+          - OFF for at least 0.25s
+        then:
+          - if:
+              condition:
+                lambda: return !id(init_in_progress);
+              then:
+                - script.execute:
+                    id: play_sound
+                    priority: false
+                    sound_file: "center_button_double_press_sound"
+                - event.trigger:
+                    id: button_press_event
+                    event_type: "double_press"
+      # Triple Click
+      - timing:
+          - ON for at most 1s
+          - OFF for at most 0.25s
+          - ON for at most 1s
+          - OFF for at most 0.25s
+          - ON for at most 1s
+          - OFF for at least 0.25s
+        then:
+          - if:
+              condition:
+                lambda: return !id(init_in_progress);
+              then:
+                - script.execute:
+                    id: play_sound
+                    priority: false
+                    sound_file: "center_button_triple_press_sound"
+                - event.trigger:
+                    id: button_press_event
+                    event_type: "triple_press"
+      # Long Press
+      - timing:
+          - ON for at least 1s
+        then:
+          - if:
+              condition:
+                lambda: return !id(init_in_progress) && !id(ptt_button_hold_active);
+              then:
+                - script.execute:
+                    id: play_sound
+                    priority: false
+                    sound_file: "center_button_long_press_sound"
+                - event.trigger:
+                    id: button_press_event
+                    event_type: "long_press"
+      # Easter Egg: HA morse code
+      - timing:
+          - ON for at most 0.2s
+          - OFF for 0s to 2s
+          - ON for at most 0.2s
+          - OFF for 0s to 2s
+          - ON for at most 0.2s
+          - OFF for 0s to 2s
+          - ON for at most 0.2s
+          - OFF for 0.5s to 2s
+          - ON for at most 0.2s
+          - OFF for 0s to 2s
+          - ON for 0.2s to 2s
+        then:
+          - if:
+              condition:
+                lambda: return !id(init_in_progress);
+              then:
+                - script.execute:
+                    id: play_sound
+                    priority: true
+                    sound_file: "easter_egg_tick_sound"
+                - delay: 4s
+                - script.execute:
+                    id: play_sound
+                    priority: true
+                    sound_file: "easter_egg_tada_sound"
+                - event.trigger:
+                    id: button_press_event
+                    event_type: "easter_egg_press"
+      # Factory Reset Warning (hold 10s)
+      - timing:
+          - ON for at least 10s
+        then:
+          - script.execute:
+              id: play_sound
+              priority: true
+              sound_file: "factory_reset_initiated_sound"
+          - wait_until:
+              binary_sensor.is_off: center_button
+          - if:
+              condition:
+                lambda: return !id(factory_reset_requested);
+              then:
+                - script.execute:
+                    id: play_sound
+                    priority: true
+                    sound_file: "factory_reset_cancelled_sound"
+      # Factory Reset Confirmed (hold 22s)
+      - timing:
+          - ON for at least 22s
+        then:
+          - script.execute:
+              id: play_sound
+              priority: true
+              sound_file: "factory_reset_confirmed_sound"
+          - lambda: id(factory_reset_requested) = true;
+
+event:
+  - platform: template
+    id: button_press_event
+    name: "Button press"
+    icon: mdi:button-pointer
+    device_class: button
+    event_types:
+      - double_press
+      - triple_press
+      - long_press
+      - easter_egg_press
+
+script:
+  - id: configure_selected_wake_word
+    then:
+      - micro_wake_word.disable_model: okay_nabu
+      - micro_wake_word.disable_model: stop
+      - micro_wake_word.disable_model: hey_jarvis
+      - micro_wake_word.disable_model: hey_mycroft
+      - if:
+          condition:
+            lambda: return id(wake_word_choice).current_option() == "Okay Nabu";
+          then:
+            - micro_wake_word.enable_model: okay_nabu
+          else:
+            - micro_wake_word.enable_model: hey_jarvis
+      - micro_wake_word.enable_model: stop
+      - lambda: |-
+          const bool use_okay_nabu = id(wake_word_choice).current_option() == "Okay Nabu";
+          const std::string sensitivity = id(wake_word_sensitivity).current_option().str();
+          if (sensitivity == "Slightly sensitive") {
+            id(okay_nabu).set_probability_cutoff(217);
+            id(hey_jarvis).set_probability_cutoff(247);
+            id(hey_mycroft).set_probability_cutoff(253);
+          } else if (sensitivity == "Moderately sensitive") {
+            id(okay_nabu).set_probability_cutoff(176);
+            id(hey_jarvis).set_probability_cutoff(235);
+            id(hey_mycroft).set_probability_cutoff(242);
+          } else {
+            id(okay_nabu).set_probability_cutoff(143);
+            id(hey_jarvis).set_probability_cutoff(196);
+            id(hey_mycroft).set_probability_cutoff(237);
+          }
+          id(stop).set_probability_cutoff(use_okay_nabu ? 143 : 160);
+
+  # No-op on Atom EchoS3R (no LED hardware supported)
+  - id: control_leds
+    then: []
+
+  - id: follow_up_listen
+    mode: single
+    then:
+      - lambda: id(follow_up_armed) = false;
+      - if:
+          condition:
+            lambda: return id(follow_up_enabled);
+          then:
+            - wait_until:
+                timeout: 3s
+                condition:
+                  lambda: |-
+                    auto state = id(external_media_player).state;
+                    return state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING
+                        || state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING;
+            - wait_until:
+                timeout: 30s
+                condition:
+                  lambda: |-
+                    auto state = id(external_media_player).state;
+                    return state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING
+                        && state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING;
+            - delay: 350ms
+            - if:
+                condition:
+                  and:
+                    - not:
+                        voice_assistant.is_running:
+                    - switch.is_off: master_mute_switch
+                then:
+                  - lambda: id(follow_up_active) = true;
+                  - voice_assistant.start:
+                      silence_detection: true
+                  - repeat:
+                      count: !lambda return (int) id(follow_up_listen_window_seconds).state;
+                      then:
+                        - if:
+                            condition:
+                              not:
+                                voice_assistant.is_running:
+                            then:
+                              - script.stop: follow_up_listen
+                        - delay: 1s
+                  - if:
+                      condition:
+                        and:
+                          - voice_assistant.is_running:
+                          - lambda: return id(follow_up_active);
+                      then:
+                        - voice_assistant.stop:
+
+  - id: force_stop_wake_word_capture
+    mode: restart
+    then:
+      - delay: 6s
+      - if:
+          condition:
+            and:
+              - lambda: return !id(ptt_button_hold_active);
+              - voice_assistant.is_running:
+          then:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+            - script.execute: control_leds
+            - voice_assistant.stop:
+
+  - id: ring_timer
+    then:
+      - script.execute: enable_repeat_one
+      - script.execute:
+          id: play_sound
+          priority: true
+          sound_file: "timer_finished_sound"
+
+  - id: enable_repeat_one
+    then:
+      - media_player.repeat_one:
+          id: external_media_player
+          announcement: true
+      - lambda: |-
+            id(external_media_player)->set_playlist_delay_ms(1, 500);
+
+  - id: disable_repeat
+    then:
+      - media_player.repeat_off:
+          id: external_media_player
+          announcement: true
+      - lambda: |-
+            id(external_media_player)->set_playlist_delay_ms(1, 0);
+
+  - id: play_sound
+    parameters:
+      priority: bool
+      sound_file: string
+    then:
+      - if:
+          # Stop wake word to free the I2S bus for the speaker.
+          # During VA sessions, the VA component handles mic lifecycle via micro_wake_word linkage.
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - micro_wake_word.stop:
+      - if:
+          condition:
+            lambda: return priority;
+          then:
+            - media_player.stop:
+                id: external_media_player
+                announcement: true
+      - lambda: |-
+          float volume = id(speaker_volume).state / 100.0f;
+          if (sound_file == "wake_word_triggered_sound") {
+            volume = id(wake_sound_volume).state / 100.0f;
+          }
+          if ( (id(external_media_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING ) || priority) {
+            id(external_media_player)
+              ->make_call()
+              .set_media_url("file://" + sound_file)
+              .set_volume(volume)
+              .set_announcement(true)
+              .perform();
+          }
+      - if:
+          # Restart wake word after non-VA announcement finishes.
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - script.execute: restart_wake_word_after_announcement
+
+  - id: restart_wake_word_after_announcement
+    mode: restart
+    then:
+      - wait_until:
+          condition:
+            media_player.is_announcing:
+              id: external_media_player
+          timeout: 3s
+      - wait_until:
+          condition:
+            not:
+              media_player.is_announcing:
+                id: external_media_player
+          timeout: 60s
+      - micro_wake_word.start:
+
+  - id: fetch_first_active_timer
+    then:
+      - lambda: |
+          const auto &timers = id(va).get_timers();
+          auto output_timer = *timers.begin();
+          for (const auto &timer : timers) {
+            if (timer.is_active && timer.seconds_left <= output_timer.seconds_left) {
+              output_timer = timer;
+            }
+          }
+          id(first_active_timer) = output_timer;
+
+  - id: check_if_timers_active
+    then:
+      - lambda: |
+          const auto &timers = id(va).get_timers();
+          bool output = false;
+          for (const auto &timer : timers) {
+            if (timer.is_active) {
+              output = true;
+            }
+          }
+          id(is_timer_active) = output;
+
+  - id: activate_stop_word_once
+    then:
+      - wait_until:
+          condition:
+            media_player.is_announcing:
+              id: external_media_player
+          timeout: 5s
+      - delay: 1s
+      - if:
+          condition:
+            switch.is_off: timer_ringing
+          then:
+            - micro_wake_word.enable_model: stop
+            - wait_until:
+                not:
+                  media_player.is_announcing:
+                    id: external_media_player
+            - if:
+                condition:
+                  switch.is_off: timer_ringing
+                then:
+                  - micro_wake_word.disable_model: stop
+
+# Single shared I2S bus for both mic and speaker (ES8311 full-duplex)
+# BCLK=GPIO8, LRCLK=GPIO6, MCLK=GPIO11, DIN=GPIO7, DOUT=GPIO5
+i2s_audio:
+  - id: i2s_bus
+    i2s_lrclk_pin: GPIO6
+    i2s_bclk_pin: GPIO8
+    i2s_mclk_pin: GPIO11
+
+microphone:
+  - platform: i2s_audio
+    id: i2s_mics
+    i2s_din_pin: GPIO7
+    adc_type: external
+    pdm: false
+    sample_rate: 16000
+    bits_per_sample: 16bit
+    i2s_audio_id: i2s_bus
+    channel: left
+
+speaker:
+  # Hardware I2S speaker â€” direct I2S to NS4150B amp (no codec)
+  - platform: i2s_audio
+    id: i2s_audio_speaker
+    sample_rate: 48000
+    i2s_dout_pin: GPIO5
+    bits_per_sample: 16bit
+    i2s_audio_id: i2s_bus
+    dac_type: external
+    channel: left
+    timeout: 500ms
+    buffer_duration: 100ms
+
+  # Virtual mixer: combines announcement and media streams
+  - platform: mixer
+    id: mixing_speaker
+    output_speaker: i2s_audio_speaker
+    num_channels: 2
+    task_stack_in_psram: true
+    source_speakers:
+      - id: announcement_mixing_input
+        timeout: never
+      - id: media_mixing_input
+        timeout: never
+
+  # Resamplers for each pipeline
+  - platform: resampler
+    id: announcement_resampling_speaker
+    output_speaker: announcement_mixing_input
+    sample_rate: 48000
+    bits_per_sample: 16
+  - platform: resampler
+    id: media_resampling_speaker
+    output_speaker: media_mixing_input
+    sample_rate: 48000
+    bits_per_sample: 16
+
+sendspin:
+  id: sendspin_hub
+  task_stack_in_psram: true
+  kalman_process_error: 0.01
+
+http_request:
+
+media_source:
+  - platform: sendspin
+    id: sendspin_source
+  - platform: http_request
+    id: http_source
+    buffer_size: 500000
+  - platform: file
+    id: file_source
+    files:
+      - id: center_button_press_sound
+        file: ${center_button_press_sound_file}
+      - id: center_button_double_press_sound
+        file: ${center_button_double_press_sound_file}
+      - id: center_button_triple_press_sound
+        file: ${center_button_triple_press_sound_file}
+      - id: center_button_long_press_sound
+        file: ${center_button_long_press_sound_file}
+      - id: factory_reset_initiated_sound
+        file: ${factory_reset_initiated_sound_file}
+      - id: factory_reset_cancelled_sound
+        file: ${factory_reset_cancelled_sound_file}
+      - id: factory_reset_confirmed_sound
+        file: ${factory_reset_confirmed_sound_file}
+      - id: timer_finished_sound
+        file: ${timer_finished_sound_file}
+      - id: wake_word_triggered_sound
+        file: ${wake_word_triggered_sound_file}
+      - id: easter_egg_tick_sound
+        file: ${easter_egg_tick_sound_file}
+      - id: easter_egg_tada_sound
+        file: ${easter_egg_tada_sound_file}
+      - id: error_cloud_expired
+        file: ${error_cloud_expired_sound_file}
+
+media_player:
+  - platform: sendspin
+    id: sendspin_group_media_player
+  - platform: speaker_source
+    id: external_media_player
+    name: Media Player
+    announcement_speaker: announcement_resampling_speaker
+    media_speaker: media_resampling_speaker
+    announcement_pipeline:
+      format: FLAC
+      num_channels: 1
+      sample_rate: 48000
+    media_pipeline:
+      format: FLAC
+      num_channels: 2
+      sample_rate: 48000
+    volume_increment: 0.05
+    volume_min: 0.4
+    volume_max: 0.85
+    sources:
+      - file_source
+      - http_source
+      - sendspin_source
+    on_mute:
+      - script.execute: control_leds
+    on_unmute:
+      - script.execute: control_leds
+    on_volume:
+      - script.execute: control_leds
+    on_announcement:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: ${audio_decibel_reduction}
+          duration: 0.0s
+    on_state:
+      if:
+        condition:
+          and:
+            - switch.is_off: timer_ringing
+            - not:
+                media_player.is_announcing: external_media_player
+        then:
+          - mixer_speaker.apply_ducking:
+              id: media_mixing_input
+              decibel_reduction: 0
+              duration: 1.0s
+
+# Pinned external components (same as hubvoice-sat.yaml)
+external_components:
+  - source:
+      type: git
+      url: https://github.com/esphome/esphome
+      ref: a2d98e1d5e020200db8f3caf27a74a939a661dc4
+    components: [audio]
+  - source:
+      type: git
+      url: https://github.com/esphome/esphome
+      ref: b4b7c5b25ebe0f2ab988f700219fa3c57b2377b7
+    components: [media_player]
+  - source:
+      type: git
+      url: https://github.com/esphome/esphome
+      ref: d48058e140c98f5c2d902661d851a6b712d62434
+    components: [sendspin]
+  - source:
+      type: git
+      url: https://github.com/esphome/esphome
+      ref: 51dcce3d1f22865ebb458a5447bbc877ac946b5a
+    components: [mdns]
+  - source:
+      type: git
+      url: https://github.com/esphome/esphome
+      ref: b49b09b6ae56502aa3ce51be86f90d732d019b2c
+    refresh: 0s
+    components: [captive_portal, file, http_request, media_source, speaker_source, web_server, web_server_base, web_server_idf]
+
+
+micro_wake_word:
+  id: mww
+  microphone:
+    microphone: i2s_mics
+    channels: 0
+  stop_after_detection: false
+  models:
+    - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+      id: okay_nabu
+    - model: hey_jarvis
+      id: hey_jarvis
+    - model: hey_mycroft
+      id: hey_mycroft
+    - model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
+      id: stop
+      internal: true
+  vad:
+    probability_cutoff: 0.85
+    sliding_window_size: 1
+  on_wake_word_detected:
+    - if:
+        condition:
+          switch.is_off: master_mute_switch
+        then:
+          - if:
+              condition:
+                switch.is_on: timer_ringing
+              then:
+                - switch.turn_off: timer_ringing
+              else:
+                - if:
+                    condition:
+                      voice_assistant.is_running:
+                    then:
+                      voice_assistant.stop:
+                    else:
+                      - media_player.stop:
+                          id: external_media_player
+                      - if:
+                          condition:
+                            switch.is_on: wake_sound
+                          then:
+                            - script.execute:
+                                id: play_sound
+                                priority: true
+                                sound_file: "wake_word_triggered_sound"
+                            - wait_until:
+                                condition:
+                                  lambda: return id(external_media_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING;
+                                timeout: 2500ms
+                            - delay: 220ms
+                      - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+                      - script.execute: control_leds
+                      - voice_assistant.start:
+                          wake_word: !lambda return wake_word;
+
+select:
+  - platform: template
+    id: wake_word_choice
+    name: "Wake Word"
+    optimistic: true
+    initial_option: Hey Jarvis
+    restore_value: true
+    entity_category: config
+    options:
+      - Hey Jarvis
+      - Okay Nabu
+    on_value:
+      - script.execute: configure_selected_wake_word
+
+  - platform: template
+    id: wake_word_sensitivity
+    name: "Wake word sensitivity"
+    optimistic: true
+    initial_option: Very sensitive
+    restore_value: true
+    entity_category: config
+    options:
+      - Slightly sensitive
+      - Moderately sensitive
+      - Very sensitive
+    on_value:
+      - script.execute: configure_selected_wake_word
+
+voice_assistant:
+  id: va
+  microphone:
+    microphone: i2s_mics
+    channels: 0
+  media_player: external_media_player
+  micro_wake_word: mww
+  use_wake_word: false
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 2.0
+  on_client_connected:
+    - lambda: id(init_in_progress) = false;
+    - lambda: |-
+        id(external_media_player)
+          ->make_call()
+          .set_volume(id(speaker_volume).state / 100.0f)
+          .perform();
+    - script.execute: configure_selected_wake_word
+    - micro_wake_word.start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - script.execute: control_leds
+  on_client_disconnected:
+    - voice_assistant.stop:
+    - script.execute: configure_selected_wake_word
+    - micro_wake_word.start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - script.execute: control_leds
+  on_error:
+    - lambda: id(follow_up_armed) = false;
+    - lambda: id(follow_up_active) = false;
+    - if:
+        condition:
+          and:
+            - lambda: return !id(init_in_progress);
+            - lambda: return code != "duplicate_wake_up_detected";
+            - lambda: return code != "stt-no-text-recognized";
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_error_phase_id};
+          - script.execute: control_leds
+    - if:
+        condition:
+          - lambda: return code == "cloud-auth-failed";
+        then:
+          - script.execute:
+              id: play_sound
+              priority: true
+              sound_file: "error_cloud_expired"
+  on_start:
+    - mixer_speaker.apply_ducking:
+        id: media_mixing_input
+        decibel_reduction: ${audio_decibel_reduction}
+        duration: 0.0s
+    - if:
+        condition:
+          lambda: return !id(ptt_button_hold_active);
+        then:
+          - micro_wake_word.enable_model: stop
+          - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+          - script.execute: control_leds
+          - script.execute: force_stop_wake_word_capture
+  on_listening:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+    - script.execute: control_leds
+  on_stt_vad_start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
+    - script.execute: control_leds
+  on_stt_vad_end:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+    - script.execute: control_leds
+    - script.stop: force_stop_wake_word_capture
+    - if:
+        condition:
+          and:
+            - lambda: return !id(ptt_button_hold_active);
+            - voice_assistant.is_running:
+        then:
+          - voice_assistant.stop:
+  on_intent_progress:
+    - if:
+        condition:
+          lambda: 'return !x.empty();'
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+          - script.execute: control_leds
+          - script.execute: activate_stop_word_once
+  on_tts_start:
+    - if:
+        condition:
+          lambda: 'return id(voice_assistant_phase) != ${voice_assist_replying_phase_id};'
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+          - script.execute: control_leds
+          - script.execute: activate_stop_word_once
+    - if:
+        condition:
+          lambda: return id(follow_up_enabled) && !id(follow_up_active);
+        then:
+          - lambda: id(follow_up_armed) = true;
+    - if:
+        condition:
+          lambda: return id(whisper_mode_active);
+        then:
+          - lambda: |-
+              id(external_media_player)
+                ->make_call()
+                .set_volume(id(speaker_volume).state * ${whisper_volume_pct} / 10000.0f)
+                .perform();
+  on_end:
+    - wait_until:
+        not:
+          voice_assistant.is_running:
+    - script.stop: force_stop_wake_word_capture
+    - if:
+        condition:
+          switch.is_off: timer_ringing
+        then:
+          - micro_wake_word.disable_model: stop
+    - mixer_speaker.apply_ducking:
+        id: media_mixing_input
+        decibel_reduction: 0
+        duration: 1.0s
+    - if:
+        condition:
+          lambda: return id(whisper_mode_active);
+        then:
+          - lambda: |-
+              id(external_media_player)
+                ->make_call()
+                .set_volume(id(speaker_volume).state / 100.0f)
+                .perform();
+    - if:
+        condition:
+          lambda: return id(voice_assistant_phase) == ${voice_assist_error_phase_id};
+        then:
+          - delay: 1s
+    - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - script.execute: control_leds
+    - if:
+        condition:
+          lambda: return id(follow_up_enabled) && id(follow_up_armed) && !id(follow_up_active);
+        then:
+          - script.execute: follow_up_listen
+    - lambda: id(follow_up_active) = false;
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
+  on_timer_started:
+    - script.execute: control_leds
+  on_timer_cancelled:
+    - script.execute: control_leds
+  on_timer_updated:
+    - script.execute: control_leds
+  on_timer_tick:
+    - script.execute: control_leds
+
+button:
+  - platform: factory_reset
+    id: factory_reset_button
+    name: "Factory Reset"
+    entity_category: diagnostic
+    internal: true
+  - platform: restart
+    id: restart_button
+    name: "Restart"
+    entity_category: config
+    disabled_by_default: true
+    icon: "mdi:restart"
+
+debug:
+  update_interval: 5s
+
+

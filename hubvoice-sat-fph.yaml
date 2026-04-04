@@ -83,8 +83,10 @@ esphome:
             (void) id(speaker_volume).state;
         - delay: 200ms
         - logger.log: "on_boot: activating TAS2780 mode 2"
+        - lambda: id(tas2780_power_mode) = 2;
         - tas2780.activate:
             mode: 2
+        - lambda: id(tas2780_active) = true;
         # Fallback: if XMOS never responds and clears init, do it ourselves after 45s
         - delay: 45s
         - if:
@@ -350,11 +352,14 @@ memory_flasher:
             condition:
               lambda: return id(pd_fusb302b).contract_voltage >= 9;
             then:
+              - lambda: id(tas2780_power_mode) = 2;
               - tas2780.activate:
                   mode: 2
             else:
+              - lambda: id(tas2780_power_mode) = 0;
               - tas2780.activate:
                   mode: 0
+        - lambda: id(tas2780_active) = true;
     on_flashing_failed:
       then:
         - lambda: id(xmos_flashing_state) = 3;
@@ -410,11 +415,14 @@ fusb302b:
           condition:
             lambda: return id(pd_fusb302b).contract_voltage >= 9;
           then:
+            - lambda: id(tas2780_power_mode) = 2;
             - tas2780.activate:
                 mode: 2
           else:
+            - lambda: id(tas2780_power_mode) = 0;
             - tas2780.activate:
                 mode: 0
+      - lambda: id(tas2780_active) = true;
 
 # ============================================================================
 # MICROPHONE
@@ -447,12 +455,14 @@ speaker:
     dac_type: external
     channel: stereo
     timeout: never
+    buffer_duration: 100ms
     audio_dac: dac_proxy
 
   - platform: mixer
     id: mixing_speaker
     output_speaker: i2s_audio_speaker
     num_channels: 2
+    task_stack_in_psram: true
     source_speakers:
       - id: announcement_mixing_input
         timeout: never
@@ -474,6 +484,7 @@ speaker:
     bits_per_sample: 16
 
 http_request:
+  buffer_size_rx: 2048
 
 safe_mode:
 
@@ -500,19 +511,26 @@ media_player:
           decibel_reduction: ${audio_decibel_reduction}
           duration: 0.0s
     on_state:
-      if:
-        condition:
-          and:
-            - switch.is_off: timer_ringing
-            - not:
-                voice_assistant.is_running:
-            - not:
-                media_player.is_announcing:
-        then:
-          - mixer_speaker.apply_ducking:
-              id: media_mixing_input
-              decibel_reduction: 0
-              duration: 1.0s
+      - if:
+          condition:
+            or:
+              - media_player.is_playing: external_media_player
+              - media_player.is_announcing: external_media_player
+          then:
+            - script.execute: tas2780_ensure_active
+      - if:
+          condition:
+            and:
+              - switch.is_off: timer_ringing
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  media_player.is_announcing: external_media_player
+          then:
+            - mixer_speaker.apply_ducking:
+                id: media_mixing_input
+                decibel_reduction: 0
+                duration: 1.0s
     files:
       - id: action_button_press_sound
         file: ${action_button_press_sound_file}
@@ -1800,6 +1818,14 @@ globals:
     type: int
     restore_value: no
     initial_value: '0'
+  - id: tas2780_power_mode
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: tas2780_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
   - id: init_in_progress
     type: bool
     restore_value: no
@@ -1941,6 +1967,20 @@ script:
             - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
             - script.execute: control_leds
             - voice_assistant.stop:
+
+  - id: tas2780_ensure_active
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: return !id(tas2780_active);
+          then:
+            - logger.log:
+                format: "Activating TAS2780 with power mode %d"
+                args: ['id(tas2780_power_mode)']
+            - tas2780.activate:
+                mode: !lambda return id(tas2780_power_mode);
+            - lambda: id(tas2780_active) = true;
 
   # Master LED dispatcher --- checks state priority and delegates to sub-scripts
   - id: control_leds
@@ -2273,6 +2313,23 @@ script:
                 media_file: easter_egg_tada_sound
                 announcement: true
                 enqueue: false
+
+interval:
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            - lambda: return id(tas2780_active);
+            - for:
+                time: 60s
+                condition:
+                  or:
+                    - media_player.is_idle: external_media_player
+                    - media_player.is_paused: external_media_player
+          then:
+            - logger.log: "Deactivating TAS2780 due to 60 seconds of idle"
+            - tas2780.deactivate:
+            - lambda: id(tas2780_active) = false;
       - if:
           condition:
             lambda: return sound_file == id(factory_reset_initiated_sound);

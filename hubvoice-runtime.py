@@ -152,7 +152,7 @@ AIRPLAY_REQUIRED_MODULES = (
 )
 DLNA_RENDERER_DEFAULT_NAME = "HubVoiceDLNA"
 DLNA_RENDERER_HTTP_PORT = 38520
-DLNA_TRANSPORT_STOP_GRACE_SECONDS = 12.0
+DLNA_TRANSPORT_STOP_GRACE_SECONDS = 1.2
 DLNA_REPEAT_PLAY_GUARD_SECONDS = 8.0
 DLNA_PROXY_PREBUFFER_BYTES = 32768   # keep startup latency low for stricter HTTP clients
 DLNA_PROXY_PREBUFFER_MAX_WAIT_SECONDS = 14.0
@@ -2998,6 +2998,36 @@ def stop_media_on_satellite(satellite_host: str, announcement: bool = False) -> 
     asyncio.run(stop_media_on_satellite_async(satellite_host, announcement=announcement))
 
 
+async def _fast_stop_media_on_satellite_async(satellite_host: str) -> bool:
+    """Best-effort low-latency STOP that only uses cached media player keys."""
+    if not satellite_host:
+        return False
+
+    cached_key = _media_player_key_cache.get(satellite_host)
+    if cached_key is None:
+        return False
+
+    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
+    try:
+        await asyncio.wait_for(client.connect(login=True), timeout=1.2)
+        client.media_player_command(cached_key, command=MediaPlayerCommand.STOP, announcement=False)
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+def _fast_stop_media_on_satellite(satellite_host: str) -> None:
+    try:
+        asyncio.run(_fast_stop_media_on_satellite_async(satellite_host))
+    except Exception:
+        pass
+
+
 def _stop_music_for_voice(satellite_host: str, update_hubmusic_state: bool) -> None:
     """Background helper: stop HubMusic media playback when a voice session starts."""
     snapshot = _HUB_MUSIC_STATE.snapshot() if update_hubmusic_state else {}
@@ -4534,10 +4564,13 @@ def stop_hubmusic_route(payload: dict, *, default_snapshot: dict | None = None) 
     retried: list[dict] = []
 
     if HUBMUSIC_SOFT_STOP_ONLY:
+        fast_stop_hosts: list[str] = []
         for target in targets:
             sat_id = str(target.get("id", ""))
             sat_alias = str(target.get("alias", ""))
             sat_host = str(target.get("host", ""))
+            if sat_host:
+                fast_stop_hosts.append(sat_host)
             stopped.append(
                 {
                     "id": sat_id,
@@ -4548,6 +4581,11 @@ def stop_hubmusic_route(payload: dict, *, default_snapshot: dict | None = None) 
                     "soft_stop": True,
                 }
             )
+
+        # Best-effort immediate STOP on satellite players so user-initiated stop feels instant,
+        # while still preserving soft-stop behavior as the primary path.
+        for sat_host in fast_stop_hosts:
+            threading.Thread(target=_fast_stop_media_on_satellite, args=(sat_host,), daemon=True).start()
 
         _HUB_MUSIC_STATE.stop(stopped)
         _HUB_MUSIC_STATE.set_results("stop", stopped=stopped, failed=failed, retried=retried, exclude_satellite=exclude_id, mode=mode)
@@ -6146,7 +6184,7 @@ def _stop_dlna_media(paused: bool = False, force: bool = False) -> dict:
 
     if not force and not paused and last_play > 0:
         elapsed = time.monotonic() - last_play
-        if elapsed < DLNA_TRANSPORT_STOP_GRACE_SECONDS and transport_state in {"PLAYING", "TRANSITIONING"}:
+        if elapsed < DLNA_TRANSPORT_STOP_GRACE_SECONDS and transport_state == "TRANSITIONING":
             logging.info(
                 "DLNA stop ignored as transient sender flap (elapsed=%.2fs, state=%s)",
                 elapsed,

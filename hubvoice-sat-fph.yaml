@@ -153,6 +153,8 @@ wifi:
       subnet: 255.255.255.0
   on_connect:
     - lambda: id(improv_ble_in_progress) = false;
+    - delay: 5s
+    - ble.disable:
     - if:
         condition:
           lambda: return id(init_in_progress);
@@ -163,6 +165,7 @@ wifi:
     - micro_wake_word.start:
     - script.execute: control_leds
   on_disconnect:
+    - ble.enable:
     - micro_wake_word.stop:
     - script.execute: control_leds
 
@@ -456,7 +459,7 @@ speaker:
         buffer_duration: 500ms
       - id: media_mixing_input
         timeout: never
-        buffer_duration: 500ms
+        buffer_duration: 100ms
 
   - platform: resampler
     id: announcement_resampling_speaker
@@ -471,6 +474,8 @@ speaker:
     bits_per_sample: 16
 
 http_request:
+
+safe_mode:
 
 media_player:
   - platform: speaker
@@ -489,6 +494,25 @@ media_player:
     volume_increment: 0.05
     volume_min: 0.1
     volume_max: 1.0
+    on_announcement:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: ${audio_decibel_reduction}
+          duration: 0.0s
+    on_state:
+      if:
+        condition:
+          and:
+            - switch.is_off: timer_ringing
+            - not:
+                voice_assistant.is_running:
+            - not:
+                media_player.is_announcing:
+        then:
+          - mixer_speaker.apply_ducking:
+              id: media_mixing_input
+              decibel_reduction: 0
+              duration: 1.0s
     files:
       - id: action_button_press_sound
         file: ${action_button_press_sound_file}
@@ -589,6 +613,11 @@ voice_assistant:
   auto_gain: 0 dbfs
   volume_multiplier: 1
   on_client_connected:
+    - wait_until:
+      not: ble.enabled
+    - wait_until:
+      not: memory_flasher.in_progress
+    - delay: 2s
     - lambda: id(init_in_progress) = false;
     - lambda: |-
         // Local media_player is currently disabled.

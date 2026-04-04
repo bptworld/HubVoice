@@ -5,7 +5,7 @@ This is the clean restart workspace.
 Files:
 - `home-assistant-voice-official.yaml`: untouched official HA Voice PE YAML from `esphome/home-assistant-voice-pe`
 - `hubvoice-sat.yaml`: working copy we will adapt from that official baseline
-- `secrets.yaml`: copied from the current local setup so ESPHome has Wi-Fi secrets
+- `secrets.yaml`: local-only development file; keep `wifi_ssid` and `wifi_password` empty before creating distributable release bins
 - `build-hubvoice-sat.ps1`: repeatable local config/compile entrypoint for this workspace
 - `build-setup-launcher.ps1`: publishes the Windows setup launcher exe and refreshes the repo-root exe
 - `flash.bat`: simple Windows wrapper for config / compile / flash commands
@@ -36,6 +36,8 @@ Recommended end-user update flow:
 - first install on a stock/unknown satellite: USB
 - later updates on a satellite already running HubVoiceSat: OTA package
 - use `.\build-ota-release.ps1` to generate the OTA handoff zip for end users
+- `build-ota-release.ps1` will fail if `secrets.yaml` has non-empty Wi-Fi values to prevent embedding personal credentials in shipped firmware
+- `build-ota-release.ps1` also scans the compiled `.bin` files and fails if local Wi-Fi, satellite, Hubitat, callback, or setup values from this workspace are found inside them
 
 Suggested first-time USB path for end users:
 - plug the satellite into USB
@@ -49,6 +51,7 @@ Useful commands:
 - `.\build-hubvoice-sat.ps1 -Action compile`
 - `.\build-setup-launcher.ps1`
 - `.\build-ota-release.ps1`
+- `.\verify-firmware-bins.ps1 -BinPaths .\hubvoice-sat-2026.03.31.6-factory.bin,.\hubvoice-sat-2026.03.31.6-ota.bin`
 - `.\HubVoiceSatSetup.exe`
 - `flash.bat config`
 - `flash.bat compile`

@@ -3,6 +3,7 @@ param()
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$verifyFrontendScript = Join-Path $repoRoot "verify-single-frontend-source.ps1"
 $projectPath = Join-Path $repoRoot "setup-launcher\HubVoiceSatSetup.csproj"
 $outputPath = Join-Path $repoRoot "build\HubVoiceSatSetup"
 $rootExePath = Join-Path $repoRoot "HubVoiceSatSetup.exe"
@@ -39,6 +40,15 @@ function Get-SetupAssemblyVersion([string]$rawVersion) {
 
 $firmwareVersion = Get-YamlValue -Path $yamlPath -Key "firmware_version"
 $setupVersion = Get-SetupAssemblyVersion $firmwareVersion
+
+if (-not (Test-Path $verifyFrontendScript)) {
+  throw "Frontend verification script not found at $verifyFrontendScript"
+}
+
+& powershell -NoProfile -ExecutionPolicy Bypass -File $verifyFrontendScript
+if ($LASTEXITCODE -ne 0) {
+  throw "Frontend source-of-truth verification failed"
+}
 
 if (Test-Path $outputPath) {
   Remove-Item $outputPath -Recurse -Force

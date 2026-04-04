@@ -5,9 +5,9 @@ record Hunk(int OriginalStart, List<string> Lines);
 record FilePatch(string OriginalPath, string UpdatedPath, List<Hunk> Hunks);
 record HunkLine(char Operation, string Content);
 
-static class Program
+public static class Program
 {
-    static int Main(string[] args)
+    public static int Main(string[] args)
     {
         try
         {

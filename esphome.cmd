@@ -1,12 +1,12 @@
 @echo off
 setlocal
 set "ROOT=%~dp0"
-set "ESPHOME=%ROOT%.envs\runtime\Scripts\esphome.exe"
+set "PYTHON=%ROOT%.envs\runtime\Scripts\python.exe"
 
-if not exist "%ESPHOME%" (
-  echo ESPHome is not installed in this repo at "%ESPHOME%"
+if not exist "%PYTHON%" (
+  echo Runtime Python is not installed in this repo at "%PYTHON%"
   exit /b 1
 )
 
-"%ESPHOME%" %*
+"%PYTHON%" -m esphome %*
 exit /b %ERRORLEVEL%

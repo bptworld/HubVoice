@@ -18,6 +18,9 @@
     <EmbeddedResource Include="..\setup-web.ps1">
       <LogicalName>Payload/setup-web.ps1</LogicalName>
     </EmbeddedResource>
+    <EmbeddedResource Include="..\_live_setup_page.html">
+      <LogicalName>Payload/_live_setup_page.html</LogicalName>
+    </EmbeddedResource>
     <EmbeddedResource Include="..\build-ota-release.ps1">
       <LogicalName>Payload/build-ota-release.ps1</LogicalName>
     </EmbeddedResource>

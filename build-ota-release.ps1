@@ -3,9 +3,12 @@ param()
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$verifyFrontendScript = Join-Path $repoRoot "verify-single-frontend-source.ps1"
 $venvScripts = Join-Path $repoRoot ".envs\runtime\Scripts"
-$esphomeExe = Join-Path $venvScripts "esphome.exe"
+$runtimePython = Join-Path $venvScripts "python.exe"
 $buildScript = Join-Path $repoRoot "build-hubvoice-sat.ps1"
+$secretsPath = Join-Path $repoRoot "secrets.yaml"
+$verifyFirmwareBinsScript = Join-Path $repoRoot "verify-firmware-bins.ps1"
 $setupProject = Join-Path $repoRoot "setup-launcher\HubVoiceSatSetup.csproj"
 $setupBuildDir = Join-Path $repoRoot "build\HubVoiceSatSetup"
 $setupExeSource = Join-Path $setupBuildDir "HubVoiceSatSetup.exe"
@@ -13,6 +16,18 @@ $runtimeBuildScript = Join-Path $repoRoot "build-runtime-exe.ps1"
 $runtimeBuildDir = Join-Path $repoRoot "build\HubVoiceRuntime"
 $runtimeExeSource = Join-Path $runtimeBuildDir "HubVoiceRuntime.exe"
 $env:PATH = "$venvScripts;$repoRoot;$env:PATH"
+
+if (-not (Test-Path $verifyFrontendScript)) {
+  throw "Frontend verification script not found at $verifyFrontendScript"
+}
+if (-not (Test-Path $verifyFirmwareBinsScript)) {
+  throw "Firmware verification script not found at $verifyFirmwareBinsScript"
+}
+
+& powershell -NoProfile -ExecutionPolicy Bypass -File $verifyFrontendScript
+if ($LASTEXITCODE -ne 0) {
+  throw "Frontend source-of-truth verification failed"
+}
 
 function Get-YamlValue {
   param(
@@ -27,6 +42,60 @@ function Get-YamlValue {
   }
   return $match.Matches[0].Groups[1].Value.Trim()
 }
+
+function Get-SecretValue {
+  param(
+    [string]$Path,
+    [string]$Key
+  )
+
+  if (-not (Test-Path $Path)) {
+    return $null
+  }
+
+  $pattern = "^\s*${Key}:\s*""?(.*?)""?\s*$"
+  $match = Select-String -Path $Path -Pattern $pattern | Select-Object -First 1
+  if (-not $match) {
+    return $null
+  }
+
+  return $match.Matches[0].Groups[1].Value.Trim()
+}
+
+function Assert-ReleaseSecretsAreSafe {
+  param(
+    [string]$Path
+  )
+
+  $ssid = Get-SecretValue -Path $Path -Key "wifi_ssid"
+  $password = Get-SecretValue -Path $Path -Key "wifi_password"
+
+  if ([string]::IsNullOrWhiteSpace($ssid) -and [string]::IsNullOrWhiteSpace($password)) {
+    return
+  }
+
+  throw @"
+Refusing to build release firmware because secrets.yaml contains Wi-Fi credentials.
+This can embed personal SSID/password into OTA and factory .bin files.
+
+Set both wifi_ssid and wifi_password to empty strings before running build-ota-release.ps1.
+"@
+}
+
+function Invoke-ESPHome {
+  param(
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Arguments
+  )
+
+  if (-not (Test-Path $runtimePython)) {
+    throw "Runtime Python was not found at $runtimePython"
+  }
+
+  & $runtimePython -m esphome @Arguments
+}
+
+Assert-ReleaseSecretsAreSafe -Path $secretsPath
 
 $yamlPath = Join-Path $repoRoot "hubvoice-sat.yaml"
 $version = Get-YamlValue -Path $yamlPath -Key "firmware_version"
@@ -58,10 +127,8 @@ $fphBuildDirs = @(
   (Join-Path $repoRoot ".esphome\build\sat-kitchen\.pioenvs\sat-kitchen")
 )
 
-$buildDir = $null
 $sourceOtaBin = $null
 $sourceFactoryBin = $null
-$fphBuildDir = $null
 $fphSourceOtaBin = $null
 $fphSourceFactoryBin = $null
 
@@ -69,7 +136,6 @@ foreach ($candidateDir in $buildDirs) {
   $candidateOtaBin = Join-Path $candidateDir "firmware.ota.bin"
   $candidateFactoryBin = Join-Path $candidateDir "firmware.factory.bin"
   if ((Test-Path $candidateOtaBin) -and (Test-Path $candidateFactoryBin)) {
-    $buildDir = $candidateDir
     $sourceOtaBin = $candidateOtaBin
     $sourceFactoryBin = $candidateFactoryBin
     break
@@ -80,14 +146,13 @@ foreach ($candidateDir in $fphBuildDirs) {
   $candidateOtaBin = Join-Path $candidateDir "firmware.ota.bin"
   $candidateFactoryBin = Join-Path $candidateDir "firmware.factory.bin"
   if ((Test-Path $candidateOtaBin) -and (Test-Path $candidateFactoryBin)) {
-    $fphBuildDir = $candidateDir
     $fphSourceOtaBin = $candidateOtaBin
     $fphSourceFactoryBin = $candidateFactoryBin
     break
   }
 }
 
-if (-not ((Test-Path $sourceOtaBin) -and (Test-Path $sourceFactoryBin))) {
+if (-not $sourceOtaBin -or -not $sourceFactoryBin -or -not (Test-Path $sourceOtaBin) -or -not (Test-Path $sourceFactoryBin)) {
   if (-not (Test-Path $buildScript)) {
     throw "Build script was not found at $buildScript"
   }
@@ -105,7 +170,6 @@ if (-not ((Test-Path $sourceOtaBin) -and (Test-Path $sourceFactoryBin))) {
     $candidateOtaBin = Join-Path $candidateDir "firmware.ota.bin"
     $candidateFactoryBin = Join-Path $candidateDir "firmware.factory.bin"
     if ((Test-Path $candidateOtaBin) -and (Test-Path $candidateFactoryBin)) {
-      $buildDir = $candidateDir
       $sourceOtaBin = $candidateOtaBin
       $sourceFactoryBin = $candidateFactoryBin
       break
@@ -113,13 +177,13 @@ if (-not ((Test-Path $sourceOtaBin) -and (Test-Path $sourceFactoryBin))) {
   }
 }
 
-if (-not ((Test-Path $fphSourceOtaBin) -and (Test-Path $fphSourceFactoryBin))) {
+if (-not $fphSourceOtaBin -or -not $fphSourceFactoryBin -or -not (Test-Path $fphSourceOtaBin) -or -not (Test-Path $fphSourceFactoryBin)) {
   if (-not (Test-Path $fphYamlPath)) {
     throw "FPH YAML config was not found at $fphYamlPath"
   }
   Push-Location $repoRoot
   try {
-    & $esphomeExe compile $fphYamlPath
+    Invoke-ESPHome compile $fphYamlPath
     if ($LASTEXITCODE -ne 0) {
       throw "FPH firmware compile failed"
     }
@@ -131,7 +195,6 @@ if (-not ((Test-Path $fphSourceOtaBin) -and (Test-Path $fphSourceFactoryBin))) {
     $candidateOtaBin = Join-Path $candidateDir "firmware.ota.bin"
     $candidateFactoryBin = Join-Path $candidateDir "firmware.factory.bin"
     if ((Test-Path $candidateOtaBin) -and (Test-Path $candidateFactoryBin)) {
-      $fphBuildDir = $candidateDir
       $fphSourceOtaBin = $candidateOtaBin
       $fphSourceFactoryBin = $candidateFactoryBin
       break
@@ -139,17 +202,27 @@ if (-not ((Test-Path $fphSourceOtaBin) -and (Test-Path $fphSourceFactoryBin))) {
   }
 }
 
-if (-not (Test-Path $sourceOtaBin)) {
-  throw "OTA firmware not found at $sourceOtaBin"
+if (-not $sourceOtaBin -or -not (Test-Path $sourceOtaBin)) {
+  throw "OTA firmware not found after compile"
 }
-if (-not (Test-Path $sourceFactoryBin)) {
-  throw "Factory firmware not found at $sourceFactoryBin"
+if (-not $sourceFactoryBin -or -not (Test-Path $sourceFactoryBin)) {
+  throw "Factory firmware not found after compile"
 }
-if (-not (Test-Path $fphSourceOtaBin)) {
-  throw "FPH OTA firmware not found at $fphSourceOtaBin"
+if (-not $fphSourceOtaBin -or -not (Test-Path $fphSourceOtaBin)) {
+  throw "FPH OTA firmware not found after compile"
 }
-if (-not (Test-Path $fphSourceFactoryBin)) {
-  throw "FPH factory firmware not found at $fphSourceFactoryBin"
+if (-not $fphSourceFactoryBin -or -not (Test-Path $fphSourceFactoryBin)) {
+  throw "FPH factory firmware not found after compile"
+}
+
+& powershell -NoProfile -ExecutionPolicy Bypass -File $verifyFirmwareBinsScript -BinPaths @(
+  $sourceOtaBin,
+  $sourceFactoryBin,
+  $fphSourceOtaBin,
+  $fphSourceFactoryBin
+)
+if ($LASTEXITCODE -ne 0) {
+  throw "Firmware binary verification failed"
 }
 
 $releaseRoot = Join-Path $repoRoot "releases"
@@ -169,6 +242,7 @@ $instructionsPath = Join-Path $releaseDir "INSTALL.txt"
 $checksumsPath = Join-Path $releaseDir "SHA256SUMS.txt"
 $openPagePath = Join-Path $releaseDir "open-upload-page.bat"
 $openUsbFlashPath = Join-Path $releaseDir "open-usb-flash-page.bat"
+$openUsbWifiSetupPath = Join-Path $releaseDir "open-usb-wifi-setup-page.bat"
 
 if (Test-Path $releaseDir) {
   Remove-Item $releaseDir -Recurse -Force
@@ -254,6 +328,7 @@ Files in this folder:
 - $(Split-Path $releaseFphFactoryBin -Leaf) First USB install for FPH Satellite-1
 - $(Split-Path $releaseFphOtaBin -Leaf)     OTA update for FPH Satellite-1
 - open-usb-flash-page.bat      Opens ESP Web Tools for USB flashing
+- open-usb-wifi-setup-page.bat Opens serial Wi-Fi provisioning page (USB)
 - open-upload-page.bat         Opens satellite web page for OTA updates
 
 FIRST-TIME SETUP
@@ -265,8 +340,14 @@ Step 1 â€” Flash the satellite (one time per device):
       $(Split-Path $releaseFactoryBin -Leaf) (HA Voice PE)
       OR
       $(Split-Path $releaseFphFactoryBin -Leaf) (FPH Satellite-1)
-  d. Let the satellite boot and join Wi-Fi.
-  e. Open http://<satellite-ip>:8080/ and set Satellite Name
+  d. For HA Voice PE USB onboarding (recommended):
+      - After flashing, click the menu (three dots) on the device card.
+      - Choose Configure Wi-Fi and enter your home Wi-Fi credentials.
+  e. For FPH Satellite-1 fallback onboarding:
+      - Join setup Wi-Fi: HV FPH 192.168.4.1
+      - Open http://192.168.4.1/ and enter home Wi-Fi credentials.
+  f. After the satellite joins home Wi-Fi, open http://<satellite-ip>:8080/
+     and set Satellite Name
      to something like Living Room, Kitchen, or Office.
 
 Step 2 â€” Configure and launch:
@@ -311,6 +392,12 @@ $openUsbFlashBat = @"
 start "" "https://web.esphome.io/"
 "@
 Set-Content -Path $openUsbFlashPath -Value $openUsbFlashBat -Encoding ASCII
+
+$openUsbWifiSetupBat = @"
+@echo off
+start "" "https://web.esphome.io/"
+"@
+Set-Content -Path $openUsbWifiSetupPath -Value $openUsbWifiSetupBat -Encoding ASCII
 
 $openPageBat = @"
 @echo off

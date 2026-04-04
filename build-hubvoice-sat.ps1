@@ -5,21 +5,35 @@ param(
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $venvScripts = Join-Path $repoRoot ".envs\runtime\Scripts"
-$esphomeExe = Join-Path $venvScripts "esphome.exe"
-$platformioExe = Join-Path $venvScripts "platformio.exe"
+$runtimePython = Join-Path $venvScripts "python.exe"
 $patchScript = Join-Path $repoRoot "patch-generated-web-ui.ps1"
 $buildDir = Join-Path $repoRoot ".esphome\build\hubvoice-sat"
 $env:PATH = "$venvScripts;$repoRoot;$env:PATH"
 
-if (-not (Test-Path $esphomeExe)) {
-  throw "ESPHome was not found at $esphomeExe"
+if (-not (Test-Path $runtimePython)) {
+  throw "Runtime Python was not found at $runtimePython"
 }
-if (-not (Test-Path $platformioExe)) {
-  throw "PlatformIO was not found at $platformioExe"
+
+function Invoke-ESPHome {
+  param(
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Arguments
+  )
+
+  & $runtimePython -m esphome @Arguments
+}
+
+function Invoke-PlatformIO {
+  param(
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Arguments
+  )
+
+  & $runtimePython -m platformio @Arguments
 }
 
 function Invoke-GeneratedSourcePatch {
-  & $esphomeExe compile hubvoice-sat.yaml --only-generate
+  Invoke-ESPHome compile hubvoice-sat.yaml --only-generate
   if ($LASTEXITCODE -ne 0) {
     throw "ESPHome source generation failed"
   }
@@ -36,7 +50,8 @@ try {
     Invoke-GeneratedSourcePatch
   } else {
     Invoke-GeneratedSourcePatch
-    & $platformioExe run -d $buildDir -e hubvoice-sat
+    $platformioArgs = @("run", "-d", $buildDir, "-e", "hubvoice-sat")
+    Invoke-PlatformIO @platformioArgs
     if ($LASTEXITCODE -ne 0) {
       throw "PlatformIO compile failed"
     }

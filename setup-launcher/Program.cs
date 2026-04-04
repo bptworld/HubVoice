@@ -348,7 +348,9 @@ internal static class Program
 
     private static void StartLocalRuntime(string root, string runtimeScript, string runtimeExe)
     {
-        if (File.Exists(runtimeExe))
+        var preferWorkspaceRuntimeScript = FindWorkspaceScript() is not null && File.Exists(runtimeScript);
+
+        if (!preferWorkspaceRuntimeScript && File.Exists(runtimeExe))
         {
             var exePsi = new ProcessStartInfo
             {

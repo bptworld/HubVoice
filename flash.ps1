@@ -12,7 +12,7 @@ param(
 )
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$EsphomeVenv = Join-Path $Root ".envs\runtime\Scripts\esphome.exe"
+$RuntimePython = Join-Path $Root ".envs\runtime\Scripts\python.exe"
 $SatellitesCSV = Join-Path $Root "satellites.csv"
 
 # Select YAML based on hardware model
@@ -35,24 +35,21 @@ $YamlFile = Join-Path $Root $YamlMap[$YamlKey]
 Write-Host "Using config: $($YamlMap[$YamlKey])"
 
 # Check ESPHome installed
-if (-not (Test-Path $EsphomeVenv)) {
-    Write-Host "ESPHome is not installed. Run:"
+if (-not (Test-Path $RuntimePython)) {
+    Write-Host "Runtime Python is not installed. Run:"
     Write-Host "  .\.envs\runtime\Scripts\python.exe -m pip install esphome==2026.2.4"
     [Environment]::Exit(1)
 }
 
 # Load first satellite from CSV
 $DefaultDevice = "hubvoice-sat"
-$DefaultIP = ""
 if (Test-Path $SatellitesCSV) {
     $csv = @(Get-Content $SatellitesCSV | Where-Object {$_ -and -not $_.StartsWith("#")})
     if ($csv.Count -gt 0) {
         $parts = $csv[0].Split(",")
         $first = $parts[0].Trim()
-        $firstIP = if ($parts.Count -ge 2) { $parts[1].Trim() } else { "" }
         if ($first) {
             $DefaultDevice = $first
-            $DefaultIP = $firstIP
         }
     }
 }
@@ -117,7 +114,7 @@ $esphomeArgs = @(
 Write-Host "Running: esphome $($esphomeArgs -join ' ')"
 Write-Host ""
 
-& $EsphomeVenv @esphomeArgs
+& $RuntimePython -m esphome @esphomeArgs
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""

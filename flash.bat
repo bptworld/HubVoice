@@ -2,7 +2,7 @@
 setlocal
 
 set "ROOT=%~dp0"
-set "ESPHOME=%ROOT%.envs\runtime\Scripts\esphome.exe"
+set "PYTHON=%ROOT%.envs\runtime\Scripts\python.exe"
 set "PATH=%ROOT%.envs\runtime\Scripts;%ROOT%;%PATH%"
 for /f "tokens=1,* delims=:" %%A in ('findstr /b /c:"  firmware_version:" "%ROOT%hubvoice-sat.yaml"') do if not defined FW_VERSION set "FW_VERSION=%%B"
 for /f "tokens=1,* delims=:" %%A in ('findstr /b /c:"  device_name:" "%ROOT%hubvoice-sat.yaml"') do if not defined DEVICE_NAME set "DEVICE_NAME=%%B"
@@ -18,10 +18,10 @@ if not defined DEVICE_NAME set "DEVICE_NAME=hubvoice-sat"
 if not defined FRIENDLY_NAME set "FRIENDLY_NAME=%DEVICE_NAME%"
 set "SATELLITE_MAP=%ROOT%satellites.csv"
 
-if not exist "%ESPHOME%" (
-  echo ESPHome is not installed in this repo at "%ESPHOME%"
+if not exist "%PYTHON%" (
+  echo Runtime Python is not installed in this repo at "%PYTHON%"
   echo.
-  echo Run this once from C:\HubVoiceSat:
+  echo Run this once from C:\HubVoice:
   echo   .\.envs\runtime\Scripts\python.exe -m pip install esphome==2026.2.4
   echo.
   pause
@@ -94,31 +94,31 @@ echo   flash.bat run
 exit /b 1
 
 :config
-"%ESPHOME%" -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" config "%ROOT%hubvoice-sat.yaml"
+"%PYTHON%" -m esphome -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" config "%ROOT%hubvoice-sat.yaml"
 goto done
 
 :compile
-"%ESPHOME%" -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" compile "%ROOT%hubvoice-sat.yaml"
+"%PYTHON%" -m esphome -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" compile "%ROOT%hubvoice-sat.yaml"
 goto done
 
 :usb
-"%ESPHOME%" -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" run "%ROOT%hubvoice-sat.yaml" --device COM3
+"%PYTHON%" -m esphome -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" run "%ROOT%hubvoice-sat.yaml" --device COM3
 goto done
 
 :ota
 if defined TARGET_IP (
-  "%ESPHOME%" -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" run "%ROOT%hubvoice-sat.yaml" --device "%TARGET_IP%"
+  "%PYTHON%" -m esphome -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" run "%ROOT%hubvoice-sat.yaml" --device "%TARGET_IP%"
 ) else (
-  "%ESPHOME%" -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" run "%ROOT%hubvoice-sat.yaml" --device "%TARGET_DEVICE%.local"
+  "%PYTHON%" -m esphome -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" run "%ROOT%hubvoice-sat.yaml" --device "%TARGET_DEVICE%.local"
 )
 if not "%ERRORLEVEL%"=="0" goto ota_ip_retry
 goto done
 
 :run
 if defined TARGET_IP (
-  "%ESPHOME%" -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" run "%ROOT%hubvoice-sat.yaml" --device "%TARGET_IP%"
+  "%PYTHON%" -m esphome -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" run "%ROOT%hubvoice-sat.yaml" --device "%TARGET_IP%"
 ) else (
-  "%ESPHOME%" -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" run "%ROOT%hubvoice-sat.yaml" --device "%TARGET_DEVICE%.local"
+  "%PYTHON%" -m esphome -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" run "%ROOT%hubvoice-sat.yaml" --device "%TARGET_DEVICE%.local"
 )
 if not "%ERRORLEVEL%"=="0" goto ota_ip_retry
 goto done
@@ -133,7 +133,7 @@ if defined TARGET_IP (
 set /p TARGET_IP=Enter satellite IP address to retry, or press Enter to skip: 
 if not defined TARGET_IP goto done
 echo.
-"%ESPHOME%" -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" run "%ROOT%hubvoice-sat.yaml" --device "%TARGET_IP%"
+"%PYTHON%" -m esphome -s device_name "%TARGET_DEVICE%" -s friendly_name "%TARGET_FRIENDLY%" run "%ROOT%hubvoice-sat.yaml" --device "%TARGET_IP%"
 if "%ERRORLEVEL%"=="0" call :save_ip
 goto done
 

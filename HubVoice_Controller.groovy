@@ -120,7 +120,8 @@ def on() {
         sanitizeMode(settings?.defaultHubMusicMode),
         sanitizeText(settings?.defaultSatellite),
         sanitizeText(settings?.defaultExcludeSatellite),
-        sanitizeText(settings?.defaultTitle) ?: "HubVoice"
+        sanitizeText(settings?.defaultTitle) ?: "HubVoice",
+        "default"
     )
 }
 

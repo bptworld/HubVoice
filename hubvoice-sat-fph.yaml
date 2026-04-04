@@ -1,4 +1,4 @@
-﻿# TTS/voice answer path is now locked to media_player transport for all spoken replies.
+# TTS/voice answer path is now locked to media_player transport for all spoken replies.
 # Do not revert to VA event TTS_END URL delivery for answers.
 # All future changes must preserve this path for reliability.
 #
@@ -22,7 +22,7 @@ substitutions:
   hidden_ssid: "false"
   device_name: "hubvoice-sat-fph"
   friendly_name: "HubVoiceSat FPH"
-  firmware_version: "2026.03.31.6"
+  firmware_version: "2026.04.03.1"
   xmos_fw_version: "v1.0.3"
 
   # ============================================================================
@@ -145,13 +145,12 @@ psram:
 wifi:
   id: wifi_id
   power_save_mode: none
-  fast_connect: ${hidden_ssid}
-  networks:
-    - ssid: !secret wifi_ssid
-      password: !secret wifi_password
   ap:
-    ssid: "${friendly_name} Setup"
-    password: "hubvoicesat123"
+    ssid: "HV FPH 192.168.4.1"
+    manual_ip:
+      static_ip: 192.168.4.1
+      gateway: 192.168.4.1
+      subnet: 255.255.255.0
   on_connect:
     - lambda: id(improv_ble_in_progress) = false;
     - if:
@@ -184,7 +183,7 @@ logger:
     ota: WARN
     esp-idf: WARN
 
-# No encryption â€” hubvoice-runtime.py connects without a HA-managed key
+# No encryption - hubvoice-runtime.py connects without a HA-managed key
 api:
   id: api_id
   port: ${esphome_api_port}
@@ -214,13 +213,17 @@ ota:
 
 web_server:
   port: ${http_server_port}
+  local: true
   js_include: web-ui-custom.js
 
 captive_portal:
 
+esp32_improv:
+  authorizer: none
+
 improv_serial:
 
-# FutureProofHomes custom components â€” required for XMOS, DACs, duplex I2S, etc.
+# FutureProofHomes custom components - required for XMOS, DACs, duplex I2S, etc.
 external_components:
   - source:
       type: git
@@ -367,17 +370,17 @@ memory_flasher:
 # ============================================================================
 
 audio_dac:
-  # PCM5122 â€” line-out (3.5mm jack)
+  # PCM5122 - line-out (3.5mm jack)
   - platform: pcm5122
     id: line_out_dac
     i2c_id: i2c_0
     address: 0x4D
-  # TAS2780 â€” internal speaker amplifier
+  # TAS2780 - internal speaker amplifier
   - platform: tas2780
     id: speaker_dac
     i2c_id: i2c_0
     address: 0x3F
-  # satellite1 DAC proxy â€” routes between speaker and line-out, syncs volume
+  # satellite1 DAC proxy - routes between speaker and line-out, syncs volume
   - platform: satellite1
     id: dac_proxy
     speaker_dac: speaker_dac
@@ -390,7 +393,7 @@ audio_dac:
     on_state_change:
       - script.execute: control_leds
 
-# USB-C Power Delivery controller â€” activates TAS2780 boost mode at â‰¥9V
+# USB-C Power Delivery controller - activates TAS2780 boost mode at >=9V
 fusb302b:
   id: pd_fusb302b
   irq_pin: GPIO1
@@ -428,7 +431,7 @@ microphone:
 
 # ============================================================================
 # SPEAKER PIPELINE
-# i2s_audio â†’ mixer â† (announcement resampler, media resampler)
+# i2s_audio --- mixer --- (announcement resampler, media resampler)
 # ============================================================================
 
 speaker:
@@ -724,7 +727,7 @@ voice_assistant:
     - script.execute: control_leds
 
 # ============================================================================
-# LED RING â€” 24x WS2812 on GPIO21
+# LED RING --- 24x WS2812 on GPIO21
 # ============================================================================
 
 light:
@@ -737,7 +740,7 @@ light:
     max_refresh_rate: 15ms
     default_transition_length: 0ms
 
-  # Voice assistant LED ring â€” full 24 LEDs, internal (device-controlled)
+  # Voice assistant LED ring --- full 24 LEDs, internal (device-controlled)
   - platform: partition
     id: voice_assistant_leds
     internal: true
@@ -1040,7 +1043,7 @@ light:
             }
             index = (index + 1);
 
-  # User-facing LED ring â€” exposed for ambient lighting control
+  # User-facing LED ring --- exposed for ambient lighting control
   - platform: partition
     id: led_ring
     name: LED Ring
@@ -1060,11 +1063,11 @@ light:
         to: 23
 
 # ============================================================================
-# BINARY SENSORS â€” buttons + jack detect
+# BINARY SENSORS --- buttons + jack detect
 # ============================================================================
 
 binary_sensor:
-  # Action button (GPIO0) â€” PTT voice, double/triple/long press events, factory reset
+  # Action button (GPIO0) --- PTT voice, double/triple/long press events, factory reset
   - platform: gpio
     id: action_button
     pin:
@@ -1246,7 +1249,7 @@ binary_sensor:
               effect: "none"
           - lambda: id(factory_reset_requested) = true;
 
-  # Vol+ button â€” via satellite1 GPIO expander
+  # Vol+ button --- via satellite1 GPIO expander
   - platform: gpio
     id: btn_vol_up
     pin:
@@ -1262,7 +1265,7 @@ binary_sensor:
           id: control_volume
           increase_volume: true
 
-  # Vol- button â€” via satellite1 GPIO expander
+  # Vol- button --- via satellite1 GPIO expander
   - platform: gpio
     id: btn_vol_down
     pin:
@@ -1278,7 +1281,7 @@ binary_sensor:
           id: control_volume
           increase_volume: false
 
-  # Hardware mute switch â€” via satellite1 GPIO expander (sliding switch)
+  # Hardware mute switch --- via satellite1 GPIO expander (sliding switch)
   - platform: gpio
     id: hardware_mute_switch
     pin:
@@ -1310,7 +1313,7 @@ binary_sensor:
                 id: master_mute_switch
                 state: ON
 
-  # Line-out jack detect â€” via PCM5122 GPIO pin 4
+  # Line-out jack detect --- via PCM5122 GPIO pin 4
   - platform: gpio
     id: line_out_sensor
     pin:
@@ -1624,6 +1627,30 @@ text:
     set_action:
       - lambda: id(satellite_name).publish_state(x);
       - component.update: effective_satellite_name
+  - platform: template
+    id: wifi_setup_ssid
+    name: "WiFi Setup SSID"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    mode: text
+    min_length: 0
+    max_length: 32
+    entity_category: config
+    set_action:
+      - lambda: id(wifi_setup_ssid).publish_state(x);
+  - platform: template
+    id: wifi_setup_password
+    name: "WiFi Setup Password"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    mode: password
+    min_length: 0
+    max_length: 64
+    entity_category: config
+    set_action:
+      - lambda: id(wifi_setup_password).publish_state(x);
 
 text_sensor:
   - platform: template
@@ -1662,6 +1689,13 @@ text_sensor:
       } else {
         return id(pd_fusb302b).contract;
       }
+  - platform: template
+    id: wifi_setup_status
+    name: "WiFi Setup Status"
+    entity_category: diagnostic
+    lambda: |-
+      return id(wifi_setup_status_value);
+    update_interval: never
 
 # ============================================================================
 # EVENTS / BUTTONS
@@ -1695,6 +1729,34 @@ button:
     name: "Factory Reset"
     entity_category: diagnostic
     internal: true
+  - platform: template
+    id: apply_wifi_credentials_button
+    name: "Apply WiFi Credentials"
+    entity_category: config
+    on_press:
+      - if:
+          condition:
+            lambda: return !id(wifi_setup_ssid).state.empty();
+          then:
+            - lambda: |-
+                id(wifi_setup_status_value) = std::string("Connecting to ") + id(wifi_setup_ssid).state + "...";
+            - component.update: wifi_setup_status
+            - wifi.configure:
+                ssid: !lambda return id(wifi_setup_ssid).state;
+                password: !lambda return id(wifi_setup_password).state;
+                save: true
+                timeout: 30s
+                on_connect:
+                  - lambda: |-
+                      id(wifi_setup_status_value) = std::string("Connected to ") + id(wifi_setup_ssid).state + ". Reconnect on home Wi-Fi and open the satellite control page from your LAN.";
+                  - component.update: wifi_setup_status
+                on_error:
+                  - lambda: |-
+                      id(wifi_setup_status_value) = std::string("Failed to connect to ") + id(wifi_setup_ssid).state + ". Check the password and try again.";
+                  - component.update: wifi_setup_status
+          else:
+            - lambda: id(wifi_setup_status_value) = "Enter a Wi-Fi SSID first.";
+            - component.update: wifi_setup_status
   - platform: restart
     id: restart_sat1
     name: "Restart Sat1"
@@ -1717,6 +1779,10 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  - id: wifi_setup_status_value
+    type: std::string
+    restore_value: no
+    initial_value: '"Connect to Hub Wi-Fi, open http://192.168.4.1:8080/, then enter home Wi-Fi."'
   - id: voice_assistant_phase
     type: int
     restore_value: no
@@ -1847,7 +1913,7 @@ script:
             - script.execute: control_leds
             - voice_assistant.stop:
 
-  # Master LED dispatcher â€” checks state priority and delegates to sub-scripts
+  # Master LED dispatcher --- checks state priority and delegates to sub-scripts
   - id: control_leds
     then:
       - lambda: |
@@ -2072,7 +2138,7 @@ script:
       - lambda: id(volume_buttons_touched) = false;
       - script.execute: control_leds
 
-  # Self-looping timer ring â€” replays the sound every ~1.5s until timer_ringing turns off
+  # Self-looping timer ring --- replays the sound every ~1.5s until timer_ringing turns off
   - id: ring_timer
     mode: restart
     then:
@@ -2087,7 +2153,7 @@ script:
           then:
             - script.execute: ring_timer
 
-  # play_sound â€” plays embedded local files through the announcement pipeline
+  # play_sound --- plays embedded local files through the announcement pipeline
   - id: play_sound
     parameters:
       priority: bool

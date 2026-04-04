@@ -9,7 +9,7 @@ if not exist "%PS_SCRIPT%" (
     exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -ShutdownAll
 set "EXIT_CODE=%ERRORLEVEL%"
 
 if not "%EXIT_CODE%"=="0" (

@@ -25,7 +25,7 @@
   hidden_ssid: "false"
   device_name: "hubvoice-sat"
   friendly_name: "HubVoiceSat"
-  firmware_version: "2026.03.31.6"
+  firmware_version: "2026.04.03.1"
   
   # ============================================================================
   # AUDIO FILES
@@ -129,13 +129,6 @@ esp32:
 
 wifi:
   id: wifi_id
-  fast_connect: ${hidden_ssid}
-  networks:
-    - ssid: !secret wifi_ssid
-      password: !secret wifi_password
-  ap:
-    ssid: "${friendly_name} Setup"
-    password: "hubvoicesat123"
   on_connect:
     - lambda: id(improv_ble_in_progress) = false;
     - if:
@@ -153,6 +146,9 @@ wifi:
 
 network:
   enable_ipv6: true
+
+mdns:
+  disabled: true
 
 logger:
   level: INFO
@@ -206,9 +202,13 @@ ota:
 
 web_server:
   port: ${http_server_port}
+  local: true
   js_include: web-ui-custom.js
 
-captive_portal:
+esp32_improv:
+  authorizer: none
+
+improv_serial:
 
 text:
   - platform: template
@@ -224,6 +224,30 @@ text:
     set_action:
       - lambda: id(satellite_name).publish_state(x);
       - component.update: effective_satellite_name
+  - platform: template
+    id: wifi_setup_ssid
+    name: "WiFi Setup SSID"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    mode: text
+    min_length: 0
+    max_length: 32
+    entity_category: config
+    set_action:
+      - lambda: id(wifi_setup_ssid).publish_state(x);
+  - platform: template
+    id: wifi_setup_password
+    name: "WiFi Setup Password"
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    mode: password
+    min_length: 0
+    max_length: 64
+    entity_category: config
+    set_action:
+      - lambda: id(wifi_setup_password).publish_state(x);
 
 text_sensor:
   - platform: template
@@ -243,6 +267,13 @@ text_sensor:
     entity_category: diagnostic
     lambda: |-
       return {"${firmware_version}"};
+    update_interval: never
+  - platform: template
+    id: wifi_setup_status
+    name: "WiFi Setup Status"
+    entity_category: diagnostic
+    lambda: |-
+      return id(wifi_setup_status_value);
     update_interval: never
 
 number:
@@ -315,6 +346,10 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  - id: wifi_setup_status_value
+    type: std::string
+    restore_value: no
+    initial_value: '"Connect to Hub Wi-Fi, open http://192.168.4.1:8080/, then enter home Wi-Fi."'
   # Global variable tracking the phase of the voice assistant (defined above). Initialized to not_ready
   - id: voice_assistant_phase
     type: int
@@ -2299,6 +2334,34 @@ button:
     name: "Factory Reset"
     entity_category: diagnostic
     internal: true
+  - platform: template
+    id: apply_wifi_credentials_button
+    name: "Apply WiFi Credentials"
+    entity_category: config
+    on_press:
+      - if:
+          condition:
+            lambda: return !id(wifi_setup_ssid).state.empty();
+          then:
+            - lambda: |-
+                id(wifi_setup_status_value) = std::string("Connecting to ") + id(wifi_setup_ssid).state + "...";
+            - component.update: wifi_setup_status
+            - wifi.configure:
+                ssid: !lambda return id(wifi_setup_ssid).state;
+                password: !lambda return id(wifi_setup_password).state;
+                save: true
+                timeout: 30s
+                on_connect:
+                  - lambda: |-
+                      id(wifi_setup_status_value) = std::string("Connected to ") + id(wifi_setup_ssid).state + ". Reconnect on home Wi-Fi and open the satellite control page from your LAN.";
+                  - component.update: wifi_setup_status
+                on_error:
+                  - lambda: |-
+                      id(wifi_setup_status_value) = std::string("Failed to connect to ") + id(wifi_setup_ssid).state + ". Check the password and try again.";
+                  - component.update: wifi_setup_status
+          else:
+            - lambda: id(wifi_setup_status_value) = "Enter a Wi-Fi SSID first.";
+            - component.update: wifi_setup_status
   - platform: restart
     id: restart_button
     name: "Restart"

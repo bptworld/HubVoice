@@ -28,6 +28,7 @@
     .offline { background:#c0392b; }
     .notset { background:#666; }
     .status-actions { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
+    .status-hint { margin:8px 0 0; color:#f0bf5a; font-size:12px; line-height:1.35; }
     .action-row { display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:10px; align-items:stretch; }
     .action-row button { width:100%; }
     .tiny { padding:6px 10px; font-size:12px; }
@@ -50,7 +51,7 @@
         <h1 style="margin:0;">HubVoiceSat Setup</h1>
         <p id="build_meta" class="muted mono" style="margin:4px 0 0;">Firmware: ...</p>
       </div>
-      <button onclick="openControlDeck()" style="background:#1f9d55;font-size:1rem;padding:10px 18px;">&#9654; Satellite Controls</button>
+      <button onclick="openControlDeck()" style="background:#1f9d55;font-size:1rem;padding:10px 18px;">HubMusic</button>
     </div>
 
     <div class="card">
@@ -95,12 +96,6 @@
           <select id="piper_voice_model"></select>
           <p class="muted" style="margin-top:6px;">Choose another installed voice and click Save to switch to it.</p>
         </div>
-        <div class="full">
-          <label for="phone_audio_app">Phone Audio App (optional)</label>
-          <input id="phone_audio_app" placeholder="C:\path\to\app.exe  or  shell:AppsFolder\Publisher.AppName_hash!App" onblur="checkPhoneAppPath(this.value)">
-          <span id="phone_audio_app_status" style="font-size:0.85em; margin-top:4px; display:block;"></span>
-          <p class="muted" style="margin-top:4px;">Path to your Bluetooth audio receiver app, or a shell: URI for Microsoft Store apps. When set, a Connect Phone button appears in HubMusic.</p>
-        </div>
       </div>
     </div>
 
@@ -141,7 +136,7 @@
 
     function openControlDeck() {
       const url = (cachedState && cachedState.hubvoice_url) || 'http://127.0.0.1:8080';
-      window.open(url.replace(/\/$/, '') + '/control', '_blank');
+      window.open(url.replace(/\/$/, '') + '/control?_=' + Date.now(), '_blank');
     }
 
     function statusClassFromValue(value) {
@@ -170,6 +165,7 @@
       const statusCss = statusClassFromValue(statusValue);
       const statusLabel = statusLabelFromValue(statusValue);
       const detail = item && item.detail ? item.detail : '';
+      const hint = item && item.hint ? item.hint : '';
       const openButton = openUrl ? `<button class="alt tiny" onclick="openUrl('${openUrl}')">Open</button>` : '';
       const actions = [openButton, extraButtons || ''].filter(Boolean).join('');
       return `
@@ -179,6 +175,7 @@
             <div>${statusLabel}</div>
           </div>
           <p class="muted" style="margin:10px 0 0;">${escapeHtml(detail)}</p>
+          ${hint ? `<p class="status-hint">${escapeHtml(hint)}</p>` : ''}
           <div class="status-actions">${actions}</div>
         </div>
       `;
@@ -227,13 +224,14 @@
         const satHtml = satellites.map(sat => {
           const state = sat.update_status || 'unknown';
           const rowClass = state === 'current' ? 'firmware-current' : state === 'outdated' ? 'firmware-outdated' : state === 'ahead' ? 'firmware-ahead' : 'firmware-unknown';
-          const badgeClass = state === 'current' ? 'badge-current' : state === 'outdated' ? 'badge-outdated' : state === 'ahead' ? 'badge-ahead' : 'badge-unknown';
-          const badgeText = state === 'current' ? 'Current' : state === 'outdated' ? 'Update Needed' : state === 'ahead' ? 'Ahead' : 'Unknown';
+          const badgeClass = state === 'current' ? 'badge-current' : state === 'outdated' ? 'badge-outdated' : state === 'ahead' ? 'badge-ahead' : '';
+          const badgeText = state === 'current' ? 'Current' : state === 'outdated' ? 'Update Needed' : state === 'ahead' ? 'Ahead' : '';
+          const badgeHtml = badgeText ? `<span class="badge ${badgeClass}">${badgeText}</span>` : '';
 
           return `
           <div class="status-box sat-row ${rowClass}">
             <div class="status-row">
-              <div><strong>${escapeHtml(sat.alias || sat.name)}</strong> <span class="muted">(ID: ${escapeHtml(sat.name)} | ${escapeHtml(sat.ip)})</span><span class="badge ${badgeClass}">${badgeText}</span></div>
+              <div><strong>${escapeHtml(sat.alias || sat.name)}</strong> <span class="muted">(ID: ${escapeHtml(sat.name)} | ${escapeHtml(sat.ip)})</span>${badgeHtml}</div>
               <button class="alt tiny" onclick="openUrl('http://${escapeHtml(sat.ip)}${sat.web_port ? ':' + sat.web_port : ''}/')">Open ${sat.web_port ? ':' + sat.web_port : ''}</button>
             </div>
             <p class="muted" style="margin:10px 0 0;">
@@ -281,28 +279,15 @@
         const el = document.getElementById(key);
         if (el) el.value = value || '';
       }
+      const wifiPasswordInput = document.getElementById('wifi_password');
+      wifiPasswordInput.value = '';
+      wifiPasswordInput.placeholder = data.wifi_password_saved ? '********' : 'password';
       loadVoiceOptions(data.piper_voice_model || '', data.piper_voice_models || []);
-      if (data.phone_audio_app) checkPhoneAppPath(data.phone_audio_app);
       const tokenInput = document.getElementById('hubitat_access_token');
       tokenInput.value = '';
       tokenInput.placeholder = data.hubitat_access_token_saved ? '********' : 'access token';
       document.getElementById('status').textContent = '';
       await refreshStatus();
-    }
-
-    async function checkPhoneAppPath(path) {
-      const indicator = document.getElementById('phone_audio_app_status');
-      if (!indicator) return;
-      if (!path) { indicator.textContent = ''; return; }
-      const res = await fetch('/api/check-phone-app?path=' + encodeURIComponent(path));
-      const data = await res.json();
-      if (data.found) {
-        indicator.textContent = 'âœ“ ' + (data.reason || 'App found');
-        indicator.style.color = '#4caf50';
-      } else {
-        indicator.textContent = 'âœ— ' + (data.reason || 'Not found');
-        indicator.style.color = '#f44336';
-      }
     }
 
     async function saveSetup() {
@@ -315,7 +300,6 @@
         hubitat_access_token: document.getElementById('hubitat_access_token').value.trim(),
         callback_url: document.getElementById('callback_url').value.trim(),
         piper_voice_model: document.getElementById('piper_voice_model').value.trim(),
-        phone_audio_app: document.getElementById('phone_audio_app').value.trim(),
         satellites_text: document.getElementById('satellites_text').value
       };
 

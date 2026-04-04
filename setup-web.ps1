@@ -220,6 +220,8 @@ function Get-SecretsState {
   $state = @{
     wifi_ssid = ""
     wifi_password = ""
+    wifi_ssid_saved = $false
+    wifi_password_saved = $false
   }
 
   if (-not (Test-Path $secretsPath)) {
@@ -227,10 +229,24 @@ function Get-SecretsState {
   }
 
   foreach ($line in Get-Content $secretsPath) {
-    if ($line -match '^\s*wifi_ssid:\s*"(.*)"\s*$') {
-      $state.wifi_ssid = $matches[1]
-    } elseif ($line -match '^\s*wifi_password:\s*"(.*)"\s*$') {
-      $state.wifi_password = $matches[1]
+    if ($line -match '^\s*wifi_ssid:\s*(.*?)\s*$') {
+      $ssidValue = [string]$matches[1]
+      if (($ssidValue.StartsWith('"') -and $ssidValue.EndsWith('"')) -or ($ssidValue.StartsWith("'") -and $ssidValue.EndsWith("'"))) {
+        if ($ssidValue.Length -ge 2) {
+          $ssidValue = $ssidValue.Substring(1, $ssidValue.Length - 2)
+        }
+      }
+      $state.wifi_ssid = $ssidValue
+      $state.wifi_ssid_saved = [bool]$ssidValue
+    } elseif ($line -match '^\s*wifi_password:\s*(.*?)\s*$') {
+      $passwordValue = [string]$matches[1]
+      if (($passwordValue.StartsWith('"') -and $passwordValue.EndsWith('"')) -or ($passwordValue.StartsWith("'") -and $passwordValue.EndsWith("'"))) {
+        if ($passwordValue.Length -ge 2) {
+          $passwordValue = $passwordValue.Substring(1, $passwordValue.Length - 2)
+        }
+      }
+      $state.wifi_password = $passwordValue
+      $state.wifi_password_saved = [bool]$passwordValue
     }
   }
 
@@ -238,8 +254,18 @@ function Get-SecretsState {
 }
 
 function Save-SecretsState([hashtable]$payload) {
+  $existing = Get-SecretsState
   $ssid = [string]$payload.wifi_ssid
   $password = [string]$payload.wifi_password
+
+  # Preserve existing values when the browser submits empty fields.
+  if (-not $ssid) {
+    $ssid = [string]$existing.wifi_ssid
+  }
+  if (-not $password) {
+    $password = [string]$existing.wifi_password
+  }
+
   $ssid = $ssid.Replace('"', '\"')
   $password = $password.Replace('"', '\"')
   $content = @(
@@ -400,7 +426,9 @@ function Get-State {
   $config = Get-SetupConfig
   return @{
     wifi_ssid = $secrets.wifi_ssid
-    wifi_password = $secrets.wifi_password
+    wifi_password = ""
+    wifi_ssid_saved = [bool]$secrets.wifi_ssid_saved
+    wifi_password_saved = [bool]$secrets.wifi_password_saved
     satellites_text = Get-SatellitesText
     hubvoice_url = $config.hubvoice_url
     hubitat_host = $config.hubitat_host
@@ -488,10 +516,12 @@ function Get-HubVoiceRuntimeStatus([string]$hubvoiceUrl, [bool]$portOk, [Nullabl
 
   try {
     $payload = Invoke-RestMethod -UseBasicParsing -Uri $hubvoiceUrl -Method GET -TimeoutSec 2
-    # voice_assistant is a dict keyed by satellite ID; get the first (or any connected) bridge
+    # voice_assistant is a dict keyed by satellite ID; prefer any connected bridge.
     $voiceDict = $payload.voice_assistant
     $voice = $null
+    $bridgeCount = 0
     if ($voiceDict) {
+      $bridgeCount = @($voiceDict.PSObject.Properties).Count
       foreach ($prop in $voiceDict.PSObject.Properties) {
         $candidate = $prop.Value
         if ($candidate -and [bool]$candidate.connected) {
@@ -518,25 +548,39 @@ function Get-HubVoiceRuntimeStatus([string]$hubvoiceUrl, [bool]$portOk, [Nullabl
           "Connected and ready$listenerText"
         }
       } elseif ($voice.last_error) {
-        "Disconnected. ${statusText}: $($voice.last_error)$listenerText"
+        "Voice pipeline disconnected. ${statusText}: $($voice.last_error)$listenerText"
       } elseif ($statusText -and $statusText -ne "disconnected") {
-        "${statusText}$listenerText"
+        "Voice pipeline disconnected. ${statusText}$listenerText"
       } else {
-        "Disconnected$listenerText"
+        "Voice pipeline disconnected. Runtime is reachable but not attached to a satellite API client$listenerText"
       }
       return @{
         ok = $connected
         status = if ($connected) { "online" } else { "offline" }
         detail = $detailText
+        hint = if ($connected) {
+          ""
+        } else {
+          "Voice commands will fail with 'No API client connected'. Check satellite IP, ESPHome API port 6054 reachability, and restart runtime."
+        }
       }
     }
-  } catch {
-  }
 
-  return @{
-    ok = $true
-    status = "online"
-    detail = "Runtime reachable$listenerText"
+    return @{
+      ok = $false
+      status = "offline"
+      detail = "Runtime reachable, but no voice bridge is registered (${bridgeCount} satellites tracked)$listenerText"
+      hint = "Voice commands will fail with 'No API client connected'. Check satellites.csv entries and ensure runtime can reach satellite port 6054."
+    }
+  } catch {
+    $msg = [string]$_.Exception.Message
+    if (-not $msg) { $msg = "Unknown runtime status error" }
+    return @{
+      ok = $false
+      status = "offline"
+      detail = "Runtime status check failed: $msg$listenerText"
+      hint = "The runtime HTTP endpoint responded unexpectedly. Restart runtime and refresh status."
+    }
   }
 }
 
@@ -871,6 +915,9 @@ function Write-TextResponse($context, [int]$statusCode, [string]$contentType, [s
     $context.Response.StatusCode = $statusCode
     $context.Response.ContentType = $contentType
     $context.Response.ContentEncoding = [System.Text.Encoding]::UTF8
+    try { $context.Response.Headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0' } catch {}
+    try { $context.Response.Headers['Pragma'] = 'no-cache' } catch {}
+    try { $context.Response.Headers['Expires'] = '0' } catch {}
     try { $context.Response.ContentLength64 = $bytes.Length } catch {}
     $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
   } catch {
@@ -879,342 +926,13 @@ function Write-TextResponse($context, [int]$statusCode, [string]$contentType, [s
   }
 }
 
-$html = @'
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>HubVoiceSat Setup</title>
-  <style>
-    body { font-family: Segoe UI, Arial, sans-serif; background:#111; color:#f5f5f5; margin:0; }
-    .wrap { max-width: 920px; margin: 0 auto; padding: 24px; }
-    .card { background:#1c1c1c; border:1px solid #343434; border-radius:12px; padding:18px; margin-top:16px; }
-    h1, h2 { margin:0 0 10px; }
-    p { color:#c9c9c9; line-height:1.45; }
-    .grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:14px; }
-    .full { grid-column: 1 / -1; }
-    label { display:block; margin-bottom:6px; color:#ddd; }
-    input, textarea { width:100%; box-sizing:border-box; background:#101010; color:#f5f5f5; border:1px solid #404040; border-radius:8px; padding:10px 12px; }
-    textarea { min-height: 110px; resize: vertical; font-family: Consolas, monospace; }
-    button { background:#2b72d6; color:#fff; border:none; border-radius:8px; padding:10px 14px; cursor:pointer; margin:0; display:inline-flex; align-items:center; justify-content:center; min-height:40px; line-height:1.2; }
-    button.alt { background:#444; }
-    button.danger { background:#b03a2e; }
-    .muted { color:#aaa; }
-    .mono { font-family: Consolas, monospace; }
-    .status { margin-top:10px; font-weight:600; }
-    .status-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; }
-    .status-box { background:#101010; border:1px solid #383838; border-radius:10px; padding:12px; }
-    .status-row { display:flex; align-items:center; justify-content:space-between; gap:10px; }
-    .status-dot { width:10px; height:10px; border-radius:999px; display:inline-block; margin-right:8px; }
-    .online { background:#1f9d55; }
-    .offline { background:#c0392b; }
-    .notset { background:#666; }
-    .status-actions { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
-    .action-row { display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:10px; align-items:stretch; }
-    .action-row button { width:100%; }
-    .tiny { padding:6px 10px; font-size:12px; }
-    .sat-row { border-top:1px solid #303030; padding-top:10px; margin-top:10px; }
-    .firmware-current { border-left:4px solid #1f9d55; }
-    .firmware-outdated { border-left:4px solid #c0392b; }
-    .firmware-ahead { border-left:4px solid #d99a1f; }
-    .firmware-unknown { border-left:4px solid #666; }
-    .badge { display:inline-block; border-radius:999px; padding:2px 8px; font-size:12px; margin-left:8px; }
-    .badge-current { background:#1f9d55; color:#fff; }
-    .badge-outdated { background:#c0392b; color:#fff; }
-    .badge-ahead { background:#d99a1f; color:#111; }
-    .badge-unknown { background:#666; color:#fff; }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
-      <div>
-        <h1 style="margin:0;">HubVoiceSat Setup</h1>
-        <p id="build_meta" class="muted mono" style="margin:4px 0 0;">Firmware: ...</p>
-      </div>
-      <button onclick="openControlDeck()" style="background:#1f9d55;font-size:1rem;padding:10px 18px;">HubMusic</button>
-    </div>
+$setupPagePath = Join-Path $root "_live_setup_page.html"
+if (-not (Test-Path $setupPagePath)) {
+  throw "Setup page source not found at $setupPagePath"
+}
 
-    <div class="card">
-      <h2>Wi-Fi</h2>
-      <div class="grid">
-        <div>
-          <label for="wifi_ssid">Wi-Fi SSID</label>
-          <input id="wifi_ssid" placeholder="MyWiFi">
-        </div>
-        <div>
-          <label for="wifi_password">Wi-Fi Password</label>
-          <input id="wifi_password" type="password" placeholder="password">
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>HubVoice</h2>
-      <div class="grid">
-        <div>
-          <label for="hubvoice_url">HubVoice URL</label>
-          <input id="hubvoice_url" placeholder="http://192.168.4.23:8080">
-        </div>
-        <div>
-          <label for="callback_url">Callback URL</label>
-          <input id="callback_url" placeholder="http://192.168.4.23:8080/answer">
-        </div>
-        <div>
-          <label for="hubitat_host">Hubitat Host URL</label>
-          <input id="hubitat_host" placeholder="http://192.168.4.141">
-        </div>
-        <div>
-          <label for="hubitat_app_id">Hubitat App ID</label>
-          <input id="hubitat_app_id" placeholder="8745">
-        </div>
-        <div class="full">
-          <label for="hubitat_access_token">Hubitat Access Token</label>
-          <input id="hubitat_access_token" type="password" placeholder="access token">
-        </div>
-        <div class="full">
-          <label for="piper_voice_model">Piper Voice Model</label>
-          <select id="piper_voice_model"></select>
-          <p class="muted" style="margin-top:6px;">Choose another installed voice and click Save to switch to it.</p>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Satellites</h2>
-      <label for="satellites_text">Known satellites</label>
-      <textarea id="satellites_text" placeholder="sat-lr,192.168.4.135,Living Room"></textarea>
-      <p class="muted">One line per satellite in the format <span class="mono">id,ip[,alias]</span>. Alias is optional.</p>
-    </div>
-
-    <div class="card">
-      <div class="action-row">
-        <button onclick="saveSetup()">Save</button>
-        <button class="alt" onclick="loadSetup()">Reload</button>
-        <button class="alt" onclick="refreshStatus()">Refresh Status</button>
-        <button class="alt" onclick="createDesktopShortcut()">Create Desktop Shortcut</button>
-        <button class="danger" onclick="shutdownEverything()">Shut Down Everything</button>
-      </div>
-      <div id="status" class="status"></div>
-    </div>
-
-    <div class="card">
-      <div class="status-row">
-        <h2>Status & Controls</h2>
-        <label class="muted" style="display:flex;align-items:center;gap:8px;">
-          <input id="auto_refresh" type="checkbox" checked style="width:auto;">
-          Auto refresh
-        </label>
-      </div>
-      <div id="status_grid" class="status-grid"></div>
-      <div id="satellite_status" style="margin-top:12px;"></div>
-    </div>
-  </div>
-
-  <script>
-    let refreshTimer = null;
-    let cachedState = null;
-
-    function openControlDeck() {
-      const url = (cachedState && cachedState.hubvoice_url) || 'http://127.0.0.1:8080';
-      window.open(url.replace(/\/$/, '') + '/control', '_blank');
-    }
-
-    function statusClassFromValue(value) {
-      if (value === 'online') return 'online';
-      if (value === 'offline') return 'offline';
-      return 'notset';
-    }
-
-    function statusLabelFromValue(value) {
-      if (value === 'online') return 'Online';
-      if (value === 'offline') return 'Offline';
-      return 'Not set';
-    }
-
-    function escapeHtml(value) {
-      return String(value || '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-    }
-
-    function renderStatusCard(title, item, openUrl, extraButtons) {
-      const statusValue = item && item.status ? item.status : 'not_set';
-      const statusCss = statusClassFromValue(statusValue);
-      const statusLabel = statusLabelFromValue(statusValue);
-      const detail = item && item.detail ? item.detail : '';
-      const openButton = openUrl ? `<button class="alt tiny" onclick="openUrl('${openUrl}')">Open</button>` : '';
-      const actions = [openButton, extraButtons || ''].filter(Boolean).join('');
-      return `
-        <div class="status-box">
-          <div class="status-row">
-            <div><span class="status-dot ${statusCss}"></span>${escapeHtml(title)}</div>
-            <div>${statusLabel}</div>
-          </div>
-          <p class="muted" style="margin:10px 0 0;">${escapeHtml(detail)}</p>
-          <div class="status-actions">${actions}</div>
-        </div>
-      `;
-    }
-
-    async function openUrl(url) {
-      const res = await fetch('/api/open_url', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url })
-      });
-      const data = await res.json();
-      document.getElementById('status').textContent = data.message || (data.ok ? 'Opened.' : 'Failed.');
-    }
-
-    function scheduleStatusRefresh() {
-      if (refreshTimer) {
-        clearInterval(refreshTimer);
-        refreshTimer = null;
-      }
-      if (document.getElementById('auto_refresh').checked) {
-        refreshTimer = setInterval(refreshStatus, 10000);
-      }
-    }
-
-    async function refreshStatus() {
-      const res = await fetch('/api/status');
-      const data = await res.json();
-      const urls = data.urls || {};
-
-      const gridHtml = [
-        renderStatusCard('Setup Page', data.setup_page, urls.setup_page || 'http://127.0.0.1:8093/'),
-        renderStatusCard('HubVoice URL', data.hubvoice, urls.hubvoice || ''),
-        renderStatusCard('Voice Pipeline', data.hubvoice_runtime, urls.hubvoice || ''),
-        renderStatusCard('HubVoice Port', data.hubvoice_port, urls.hubvoice || ''),
-        renderStatusCard('Callback URL', data.callback, urls.callback || ''),
-        renderStatusCard('Callback Port', data.callback_port, urls.callback || ''),
-        renderStatusCard('Hubitat Health', data.hubitat_health, '')
-      ];
-      document.getElementById('status_grid').innerHTML = gridHtml.join('');
-
-      const satellites = Array.isArray(data.satellites) ? data.satellites : [];
-      if (!satellites.length) {
-        document.getElementById('satellite_status').innerHTML = '<p class="muted">No satellites configured.</p>';
-      } else {
-        const satHtml = satellites.map(sat => {
-          const state = sat.update_status || 'unknown';
-          const rowClass = state === 'current' ? 'firmware-current' : state === 'outdated' ? 'firmware-outdated' : state === 'ahead' ? 'firmware-ahead' : 'firmware-unknown';
-          const badgeClass = state === 'current' ? 'badge-current' : state === 'outdated' ? 'badge-outdated' : state === 'ahead' ? 'badge-ahead' : 'badge-unknown';
-          const badgeText = state === 'current' ? 'Current' : state === 'outdated' ? 'Update Needed' : state === 'ahead' ? 'Ahead' : 'Unknown';
-
-          return `
-          <div class="status-box sat-row ${rowClass}">
-            <div class="status-row">
-              <div><strong>${escapeHtml(sat.alias || sat.name)}</strong> <span class="muted">(ID: ${escapeHtml(sat.name)} | ${escapeHtml(sat.ip)})</span><span class="badge ${badgeClass}">${badgeText}</span></div>
-              <button class="alt tiny" onclick="openUrl('http://${escapeHtml(sat.ip)}${sat.web_port ? ':' + sat.web_port : ''}/')">Open ${sat.web_port ? ':' + sat.web_port : ''}</button>
-            </div>
-            <p class="muted" style="margin:10px 0 0;">
-              Ping: ${sat.ping ? 'Online' : 'Offline'} |
-              Web: ${sat.web ? 'Online' : 'Offline'}${sat.web_port ? ' on port ' + sat.web_port : ''}
-            </p>
-            <p class="mono muted" style="margin:8px 0 0;">
-              URL: http://${escapeHtml(sat.ip)}${sat.web_port ? ':' + sat.web_port : ''}/
-            </p>
-          </div>
-        `;
-        }).join('');
-        document.getElementById('satellite_status').innerHTML = satHtml;
-      }
-    }
-
-    function loadVoiceOptions(selectedValue, options) {
-      const select = document.getElementById('piper_voice_model');
-      select.innerHTML = '';
-
-      const values = Array.isArray(options) ? options.slice() : [];
-      if (selectedValue && !values.includes(selectedValue)) {
-        values.unshift(selectedValue);
-      }
-
-      for (const value of values) {
-        const option = document.createElement('option');
-        option.value = value;
-        option.textContent = value;
-        if (value === selectedValue) option.selected = true;
-        select.appendChild(option);
-      }
-    }
-
-    async function loadSetup() {
-      const res = await fetch('/api/state');
-      const data = await res.json();
-      cachedState = data;
-
-      const launcherVersion = data.launcher_version || 'unknown';
-      const firmwareVersion = data.firmware_target_version || 'unknown';
-      document.getElementById('build_meta').textContent = `Firmware: ${firmwareVersion}`;
-
-      for (const [key, value] of Object.entries(data)) {
-        const el = document.getElementById(key);
-        if (el) el.value = value || '';
-      }
-      loadVoiceOptions(data.piper_voice_model || '', data.piper_voice_models || []);
-      const tokenInput = document.getElementById('hubitat_access_token');
-      tokenInput.value = '';
-      tokenInput.placeholder = data.hubitat_access_token_saved ? '********' : 'access token';
-      document.getElementById('status').textContent = '';
-      await refreshStatus();
-    }
-
-    async function saveSetup() {
-      const payload = {
-        wifi_ssid: document.getElementById('wifi_ssid').value.trim(),
-        wifi_password: document.getElementById('wifi_password').value,
-        hubvoice_url: document.getElementById('hubvoice_url').value.trim(),
-        hubitat_host: document.getElementById('hubitat_host').value.trim(),
-        hubitat_app_id: document.getElementById('hubitat_app_id').value.trim(),
-        hubitat_access_token: document.getElementById('hubitat_access_token').value.trim(),
-        callback_url: document.getElementById('callback_url').value.trim(),
-        piper_voice_model: document.getElementById('piper_voice_model').value.trim(),
-        satellites_text: document.getElementById('satellites_text').value
-      };
-
-      const res = await fetch('/api/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await res.json();
-      document.getElementById('status').textContent = data.message || (data.ok ? 'Saved.' : 'Failed.');
-      cachedState = null;
-      await loadSetup();
-    }
-
-    async function createDesktopShortcut() {
-      const res = await fetch('/api/create_desktop_shortcut', {
-        method: 'POST'
-      });
-      const data = await res.json();
-      document.getElementById('status').textContent = data.message || (data.ok ? 'Shortcut created.' : 'Failed.');
-    }
-
-    async function shutdownEverything() {
-      const ok = confirm('Shut down setup server, runtime, and launcher now?');
-      if (!ok) return;
-
-      const res = await fetch('/api/shutdown_all', {
-        method: 'POST'
-      });
-      const data = await res.json();
-      document.getElementById('status').textContent = data.message || (data.ok ? 'Shutting down everything.' : 'Failed.');
-    }
-
-    document.getElementById('auto_refresh').addEventListener('change', scheduleStatusRefresh);
-    loadSetup();
-    scheduleStatusRefresh();
-  </script>
-</body>
-</html>
-'@
+$html = Get-Content -Path $setupPagePath -Raw -Encoding UTF8
+$setupUiToken = (Get-Date).ToString("yyyyMMddHHmmss")
 
 function Start-RuntimeIfNeeded {
   $runtimeVenvPythonw = Join-Path $root ".envs\runtime\Scripts\pythonw.exe"
@@ -1328,6 +1046,10 @@ while ($listener.IsListening) {
     $method = $context.Request.HttpMethod
 
     if ($path -eq "/") {
+      try {
+        $html = Get-Content -Path $setupPagePath -Raw -Encoding UTF8
+      } catch {
+      }
       Write-TextResponse $context 200 "text/html; charset=utf-8" $html
       continue
     }
@@ -1340,6 +1062,26 @@ while ($listener.IsListening) {
 
     if ($path -eq "/api/state" -and $method -eq "GET") {
       Write-JsonResponse $context 200 (Get-State)
+      continue
+    }
+
+    if ($path -eq "/api/version" -and $method -eq "GET") {
+      $setupHash = ""
+      try {
+        $raw = Get-Content -Path $setupPagePath -Raw -Encoding UTF8
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($raw)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $setupHash = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '')
+      } catch {
+      }
+
+      Write-JsonResponse $context 200 @{
+        ok = $true
+        token = $setupUiToken
+        root = $root
+        setup_page_path = $setupPagePath
+        setup_page_hash = $setupHash
+      }
       continue
     }
 

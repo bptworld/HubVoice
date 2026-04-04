@@ -1,4 +1,4 @@
-# TTS/voice answer path is now locked to media_player transport for all spoken replies.
+﻿# TTS/voice answer path is now locked to media_player transport for all spoken replies.
 # Do not revert to VA event TTS_END URL delivery for answers.
 # All future changes must preserve this path for reliability.
 
@@ -105,6 +105,12 @@ if getattr(sys, "frozen", False):
 else:
     ROOT = Path(__file__).resolve().parent
 
+_BUNDLED_ROOT = Path(getattr(sys, "_MEIPASS", ROOT))
+CONTROL_PAGE_CANDIDATES = (
+    ROOT / "control.html",
+    _BUNDLED_ROOT / "control.html",
+)
+
 # User data directory: store configuration, state, and logs per-user
 # On Windows: C:\Users\<username>\AppData\Local\HubVoiceSat
 # On macOS: ~/Library/Application Support/HubVoiceSat
@@ -186,6 +192,7 @@ TTS_PRESTOP_ENTITY_TIMEOUT = 1.0  # seconds
 SATELLITE_NUMBER_MAX_RETRIES = 2
 SATELLITE_NUMBER_RETRY_DELAY = 0.25  # seconds
 SATELLITE_NUMBER_POST_DELAY = 0.2  # seconds
+HUBMUSIC_SOFT_STOP_ONLY = True
 
 # HubMusic known-good profile (validated 2026-03-28: stable startup, in-sync multi-speaker playback).
 # Treat this block as the baseline and only tune with live A/B testing plus log validation.
@@ -238,11 +245,12 @@ HUBITAT_RETRY_INITIAL_DELAY = 0.5  # seconds
 HUBITAT_CIRCUIT_BREAKER_THRESHOLD = 5
 HUBITAT_CIRCUIT_BREAKER_TIMEOUT = 300  # seconds (5 minutes)
 
-logging.basicConfig(
-    filename=str(LOGS_PATH / "hubvoice-runtime.log"),
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+_log_formatter = logging.Formatter("%(asctime)s [%(levelname)-8s] %(message)s")
+_file_handler = logging.FileHandler(str(LOGS_PATH / "hubvoice-runtime.log"), encoding="utf-8")
+_file_handler.setFormatter(_log_formatter)
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_log_formatter)
+logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _console_handler])
 
 
 class HubitatCircuitBreaker:
@@ -272,7 +280,14 @@ class HubitatCircuitBreaker:
         with self._lock:
             self.failures += 1
             self.last_failure_time = time.time()
-            logging.warning("Circuit breaker recorded failure (%d/%d)", self.failures, self.threshold)
+            if self.failures >= self.threshold:
+                logging.error(
+                    "Hubitat circuit breaker OPEN after %d consecutive failures — "
+                    "fast-failing all Hubitat calls for %ds",
+                    self.failures, self.timeout,
+                )
+            else:
+                logging.warning("Circuit breaker failure %d/%d", self.failures, self.threshold)
     
     def reset(self) -> None:
         """Reset circuit breaker after successful operation."""
@@ -393,7 +408,13 @@ class HubMusicState:
             "history": [],
         }
 
-    def activate(self, satellites: list[dict], source_url: str, title: str, mode: str = "single") -> None:
+    def activate(
+        self,
+        satellites: list[dict],
+        source_url: str,
+        title: str,
+        mode: str = "single",
+    ) -> None:
         first = satellites[0] if satellites else {}
         targets = []
         for satellite in satellites:
@@ -747,10 +768,16 @@ def validate_startup_config() -> None:
             unreachable.append((sat["id"], sat["host"]))
     
     if satellites and not reachable:
-        logging.warning("No satellites are currently reachable at startup: %s", unreachable)
-    
-    if unreachable:
-        logging.warning("Some satellites unreachable: %s", unreachable)
+        logging.warning(
+            "No satellites reachable at startup — voice commands will fail until at least one responds on port 6054.\n"
+            "  Unreachable: %s",
+            ", ".join(f"{sid} ({host})" for sid, host in unreachable),
+        )
+    elif unreachable:
+        logging.warning(
+            "Some satellites unreachable at startup (port 6054): %s",
+            ", ".join(f"{sid} ({host})" for sid, host in unreachable),
+        )
     
     # Verify Piper model file exists
     try:
@@ -1129,3034 +1156,13 @@ def _update_control_deck_state(sat_id: str, **updates) -> None:
 
 
 def build_satellite_control_page() -> str:
-        return """<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>HubVoice Satellite Control</title>
-    <style>
-        :root {
-            --bg: #0b1117;
-            --panel: rgba(16, 24, 34, 0.88);
-            --panel-strong: rgba(22, 32, 44, 0.96);
-            --line: rgba(150, 184, 214, 0.18);
-            --text: #ecf3fb;
-            --muted: #99aec4;
-            --accent: #57b5ff;
-            --accent-strong: #1f8fff;
-            --good: #27c281;
-            --warn: #f2b84b;
-            --bad: #ef6b73;
-            --shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
-            --radius: 22px;
-        }
-        * { box-sizing: border-box; }
-        body {
-            margin: 0;
-            color: var(--text);
-            font-family: Bahnschrift, "Aptos", "Segoe UI Variable", "Segoe UI", sans-serif;
-            background:
-                radial-gradient(circle at top left, rgba(61, 138, 255, 0.22), transparent 28%),
-                radial-gradient(circle at top right, rgba(27, 194, 129, 0.16), transparent 22%),
-                linear-gradient(180deg, #0b1117 0%, #101925 52%, #0d131c 100%);
-            min-height: 100vh;
-        }
-        .shell {
-            width: min(1240px, calc(100% - 24px));
-            margin: 0 auto;
-            padding: 18px 0 28px;
-        }
-        .hero {
-            display: block;
-            margin-bottom: 14px;
-        }
-        .hero-card, .panel {
-            background: var(--panel);
-            border: 1px solid var(--line);
-            border-radius: var(--radius);
-            box-shadow: var(--shadow);
-            backdrop-filter: blur(14px);
-        }
-        .hero-card {
-            position: relative;
-            padding: 20px 22px;
-        }
-        .hero h1 {
-            margin: 0;
-            font-size: clamp(2rem, 4vw, 3.2rem);
-            line-height: 0.96;
-            letter-spacing: -0.03em;
-        }
-        .hero-version {
-            position: absolute;
-            top: 12px;
-            right: 16px;
-            color: var(--muted);
-            font-size: 0.82rem;
-            letter-spacing: 0.06em;
-            text-transform: uppercase;
-        }
-        .hero p {
-            margin: 0;
-            color: var(--muted);
-            font-size: 1.02rem;
-            line-height: 1.55;
-            max-width: 56ch;
-        }
-        .hero-side {
-            padding: 18px;
-            display: grid;
-            gap: 10px;
-        }
-        .hero-stat {
-            padding: 12px 14px;
-            background: var(--panel-strong);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 18px;
-        }
-        .hero-stat .label {
-            color: var(--muted);
-            font-size: 0.84rem;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-        }
-        .hero-stat .value {
-            font-size: 1.55rem;
-            margin-top: 8px;
-            font-weight: 700;
-        }
-        .toolbar {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 12px;
-            margin: 12px 0 14px;
-            flex-wrap: wrap;
-        }
-        .toolbar .note {
-            color: var(--muted);
-            font-size: 0.96rem;
-        }
-        .btn {
-            appearance: none;
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 999px;
-            padding: 12px 18px;
-            background: linear-gradient(180deg, rgba(34, 58, 84, 0.98), rgba(19, 31, 47, 0.98));
-            color: var(--text);
-            font: inherit;
-            cursor: pointer;
-            transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
-        }
-        .btn:hover { transform: translateY(-1px); border-color: rgba(87, 181, 255, 0.45); }
-        .btn.primary {
-            background: linear-gradient(180deg, #44a9ff, #1f8fff);
-            color: #08111a;
-            border-color: transparent;
-            font-weight: 700;
-        }
-        .btn.ghost {
-            background: rgba(255,255,255,0.03);
-        }
-        .btn.small { padding: 9px 14px; font-size: 0.92rem; }
-        .status {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            border-radius: 999px;
-            padding: 8px 12px;
-            font-size: 0.86rem;
-            background: rgba(255,255,255,0.04);
-            color: var(--muted);
-        }
-        .status::before {
-            content: "";
-            width: 9px;
-            height: 9px;
-            border-radius: 50%;
-            background: var(--warn);
-            box-shadow: 0 0 14px rgba(242, 184, 75, 0.4);
-        }
-        .status.good::before { background: var(--good); box-shadow: 0 0 14px rgba(39, 194, 129, 0.4); }
-        .status.bad::before { background: var(--bad); box-shadow: 0 0 14px rgba(239, 107, 115, 0.4); }
-        .cards {
-            display: grid;
-            gap: 14px;
-        }
-        .sat-tabs {
-            display: flex;
-            gap: 8px;
-            overflow-x: auto;
-            padding: 2px 2px 4px;
-        }
-        .sat-tab {
-            appearance: none;
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 12px;
-            padding: 8px 12px;
-            background: rgba(255,255,255,0.03);
-            color: var(--muted);
-            font: inherit;
-            font-size: 0.9rem;
-            font-weight: 700;
-            white-space: nowrap;
-            cursor: pointer;
-            transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease, transform 0.18s ease;
-        }
-        .sat-tab:hover {
-            transform: translateY(-1px);
-            border-color: rgba(87, 181, 255, 0.4);
-            color: #d6e9fd;
-        }
-        .sat-tab.active {
-            background: linear-gradient(180deg, rgba(36, 74, 113, 0.9), rgba(25, 50, 78, 0.9));
-            border-color: rgba(87, 181, 255, 0.55);
-            color: #eff7ff;
-            box-shadow: inset 0 0 0 1px rgba(87, 181, 255, 0.2);
-        }
-        .card {
-            padding: 20px;
-            display: grid;
-            gap: 12px;
-        }
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            gap: 12px;
-            align-items: flex-start;
-        }
-        .card-title {
-            margin: 0;
-            font-size: 1.55rem;
-            line-height: 1.02;
-        }
-        .card-subtitle {
-            margin-top: 6px;
-            color: var(--muted);
-            font-size: 0.95rem;
-        }
-        .link-row {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-        .section {
-            background: var(--panel-strong);
-            border: 1px solid rgba(255,255,255,0.05);
-            border-radius: 18px;
-            padding: 12px;
-        }
-        .control-deck {
-            display: grid;
-            grid-template-columns: minmax(0, 1.35fr) 420px;
-            gap: 12px;
-            align-items: start;
-        }
-        .main-column, .side-column {
-            display: grid;
-            gap: 12px;
-        }
-        .section h3 {
-            margin: 0 0 10px;
-            font-size: 0.82rem;
-            text-transform: uppercase;
-            letter-spacing: 0.12em;
-            color: var(--muted);
-        }
-        .section-head {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 10px;
-            margin-bottom: 10px;
-        }
-        .section-head h3 {
-            margin: 0;
-        }
-        textarea, input[type="number"], input[type="text"], input[type="url"], select {
-            width: 100%;
-            border-radius: 12px;
-            border: 1px solid rgba(255,255,255,0.1);
-            background: rgba(5, 10, 16, 0.55);
-            color: var(--text);
-            font: inherit;
-            padding: 10px 12px;
-        }
-        select {
-            appearance: none;
-        }
-        textarea {
-            min-height: 88px;
-            resize: vertical;
-            line-height: 1.35;
-        }
-        .row {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) 110px;
-            gap: 8px;
-            align-items: center;
-        }
-        .row .btn {
-            align-self: center;
-            height: 46px;
-            padding: 0 18px;
-        }
-        .mode-grid {
-            display: grid;
-            gap: 8px;
-        }
-        .mode-placeholder {
-            min-height: 86px;
-        }
-        .mode-row {
-            display: grid;
-            grid-template-columns: 180px minmax(0, 1fr);
-            gap: 10px;
-            align-items: center;
-            padding: 8px 0;
-            border-top: 1px solid rgba(255,255,255,0.04);
-        }
-        .mode-row:first-child { border-top: 0; padding-top: 0; }
-        .mode-row:last-child { padding-bottom: 0; }
-        .mode-label {
-            color: var(--text);
-            font-size: 0.95rem;
-            font-weight: 600;
-            line-height: 1.15;
-        }
-        .toggle-group {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 6px;
-            padding: 3px;
-            border-radius: 14px;
-            background: rgba(9, 16, 24, 0.9);
-            border: 1px solid rgba(255,255,255,0.07);
-            box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
-        }
-        .toggle {
-            border-radius: 13px;
-            min-height: 34px;
-            padding: 6px 10px;
-            border: 1px solid transparent;
-            background: transparent;
-            color: var(--text);
-            cursor: pointer;
-            font-size: 0.88rem;
-            font-weight: 700;
-            font: inherit;
-            transition: border-color 0.18s ease, transform 0.18s ease, background 0.18s ease;
-        }
-        .toggle:hover { border-color: rgba(255,255,255,0.1); }
-        .toggle.active.on { background: linear-gradient(180deg, rgba(33, 63, 48, 0.95), rgba(24, 45, 36, 0.95)); border-color: rgba(39, 194, 129, 0.55); box-shadow: inset 0 0 0 1px rgba(39, 194, 129, 0.12); }
-        .toggle.active.off { background: linear-gradient(180deg, rgba(57, 39, 47, 0.96), rgba(43, 28, 35, 0.96)); border-color: rgba(239, 107, 115, 0.4); box-shadow: inset 0 0 0 1px rgba(239, 107, 115, 0.08); }
-        .control-grid {
-            display: grid;
-            gap: 10px;
-        }
-        .levels-grid {
-            display: grid;
-            grid-template-columns: 1fr;
-            gap: 10px;
-        }
-        .control-row {
-            display: grid;
-            gap: 6px;
-            padding: 10px 10px 11px;
-            border-radius: 16px;
-            background: linear-gradient(180deg, rgba(25, 37, 51, 0.95), rgba(21, 31, 43, 0.95));
-            border: 1px solid rgba(255,255,255,0.05);
-        }
-        .control-row label {
-            display: flex;
-            justify-content: space-between;
-            gap: 10px;
-            color: var(--muted);
-            font-size: 0.86rem;
-        }
-        .control-row label span:first-child {
-            color: #58b8ff;
-        }
-        .control-top {
-            display: flex;
-            align-items: flex-start;
-            justify-content: space-between;
-            gap: 10px;
-        }
-        .control-title {
-            display: grid;
-            gap: 4px;
-            min-width: 0;
-        }
-        .row-action {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 4px 6px 4px 10px;
-            border-radius: 999px;
-            border: 1px solid rgba(255,255,255,0.08);
-            background: rgba(6, 12, 18, 0.7);
-            color: #eef5fd;
-            font-size: 0.8rem;
-            font-weight: 700;
-            cursor: pointer;
-            transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease;
-        }
-        .row-action:hover {
-            transform: translateY(-1px);
-            border-color: rgba(87, 181, 255, 0.3);
-        }
-        .row-action.active {
-            background: rgba(18, 83, 145, 0.32);
-            border-color: rgba(87, 181, 255, 0.35);
-        }
-        .row-switch {
-            position: relative;
-            width: 38px;
-            height: 22px;
-            border-radius: 999px;
-            background: rgba(255,255,255,0.14);
-            transition: background 0.18s ease;
-            flex: 0 0 auto;
-        }
-        .row-switch::after {
-            content: "";
-            position: absolute;
-            top: 3px;
-            left: 3px;
-            width: 16px;
-            height: 16px;
-            border-radius: 50%;
-            background: #ffffff;
-            transition: transform 0.18s ease;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
-        }
-        .row-action.active .row-switch {
-            background: rgba(87, 181, 255, 0.6);
-        }
-        .row-action.active .row-switch::after {
-            transform: translateX(16px);
-        }
-        .range-row {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) 70px;
-            gap: 8px;
-            align-items: center;
-        }
-        .control-row.disabled {
-            background: linear-gradient(180deg, rgba(20, 31, 42, 0.92), rgba(17, 26, 36, 0.92));
-            border-color: rgba(255,255,255,0.04);
-        }
-        .control-row.disabled input {
-            opacity: 0.6;
-            cursor: not-allowed;
-        }
-        .control-row.disabled label span:first-child {
-            color: #d8e5f5;
-        }
-        .control-note {
-            color: var(--muted);
-            font-size: 0.72rem;
-            letter-spacing: 0.04em;
-        }
-        .side-column .section {
-            padding: 10px;
-        }
-        .meta-strip {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-            align-items: center;
-        }
-        .chip {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            min-height: 32px;
-            padding: 0 12px;
-            border-radius: 999px;
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.06);
-            color: var(--muted);
-            font-size: 0.84rem;
-        }
-        .hubmusic-form,
-        .hubmusic-status-list,
-        .hubmusic-info-list {
-            display: grid;
-            gap: 10px;
-        }
-        .hubmusic-result-list {
-            display: grid;
-            gap: 8px;
-        }
-        .hubmusic-history-list {
-            display: grid;
-            gap: 6px;
-        }
-        .hubmusic-history-item {
-            display: grid;
-            gap: 2px;
-            padding: 8px 10px;
-            border-radius: 10px;
-            border: 1px solid rgba(255,255,255,0.08);
-            background: rgba(8, 16, 24, 0.45);
-        }
-        .hubmusic-history-main {
-            display: flex;
-            justify-content: space-between;
-            gap: 8px;
-            color: #d9e8fb;
-            font-size: 0.8rem;
-        }
-        .hubmusic-history-meta {
-            color: var(--muted);
-            font-size: 0.72rem;
-        }
-        .hubmusic-verify-report {
-            display: grid;
-            gap: 6px;
-        }
-        .hubmusic-verify-row {
-            padding: 7px 9px;
-            border-radius: 9px;
-            border: 1px solid rgba(255,255,255,0.08);
-            background: rgba(8, 16, 24, 0.45);
-            font-size: 0.76rem;
-            color: #d9e8fb;
-        }
-        .hubmusic-verify-row.bad {
-            border-color: rgba(239, 107, 115, 0.5);
-        }
-        .hubmusic-verify-row.warn {
-            border-color: rgba(255, 184, 77, 0.5);
-        }
-        .hubmusic-verify-row.good {
-            border-color: rgba(39, 194, 129, 0.5);
-        }
-        .hubmusic-history-head {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 8px;
-        }
-        .hubmusic-pill-row {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 6px;
-        }
-        .hubmusic-pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 4px 9px;
-            border-radius: 999px;
-            border: 1px solid rgba(255,255,255,0.12);
-            background: rgba(8, 16, 24, 0.62);
-            color: var(--text);
-            font-size: 0.75rem;
-            letter-spacing: 0.02em;
-        }
-        .hubmusic-pill.good {
-            border-color: rgba(39, 194, 129, 0.48);
-        }
-        .hubmusic-pill.bad {
-            border-color: rgba(239, 107, 115, 0.48);
-        }
-        .hubmusic-pill.warn {
-            border-color: rgba(255, 184, 77, 0.48);
-        }
-        .hubmusic-actions {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 8px;
-            margin-top: 4px;
-        }
-        .hubmusic-summary {
-            display: grid;
-            gap: 8px;
-        }
-        .hubmusic-summary .control-row {
-            min-height: auto;
-        }
-        .hubmusic-status-list .control-row,
-        .hubmusic-info-list .control-row {
-            min-height: auto;
-            gap: 8px;
-        }
-        input[type="range"] {
-            width: 100%;
-            accent-color: var(--accent);
-        }
-        .toast {
-            position: fixed;
-            right: 20px;
-            bottom: 20px;
-            min-width: 280px;
-            max-width: min(460px, calc(100vw - 32px));
-            padding: 14px 16px;
-            border-radius: 18px;
-            background: rgba(7, 14, 22, 0.94);
-            border: 1px solid rgba(255,255,255,0.08);
-            box-shadow: var(--shadow);
-            color: var(--text);
-            opacity: 0;
-            transform: translateY(14px);
-            transition: opacity 0.18s ease, transform 0.18s ease;
-            pointer-events: none;
-        }
-        .toast.show { opacity: 1; transform: translateY(0); }
-        .toast.good { border-color: rgba(39, 194, 129, 0.5); }
-        .toast.bad { border-color: rgba(239, 107, 115, 0.5); }
-        @media (max-width: 860px) {
-            .hero { grid-template-columns: 1fr; }
-            .control-deck { grid-template-columns: 1fr; }
-            .mode-row { grid-template-columns: 1fr; gap: 8px; }
-            .row { grid-template-columns: 1fr; }
-        }
-        .hubmusic-service-grid {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-bottom: 10px;
-        }
-        .hubmusic-sat-grid {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-bottom: 8px;
-        }
-        .hubmusic-service-detail {
-            margin-top: 4px;
-        }
-        .hubmusic-active-summary {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 6px;
-            padding: 10px 12px;
-            background: rgba(39, 194, 129, 0.06);
-            border: 1px solid rgba(39, 194, 129, 0.2);
-            border-radius: 12px;
-            margin-top: 4px;
-        }
-    </style>
-</head>
-<body>
-    <div class="shell">
-        <section class="hero">
-            <div class="hero-card">
-                <div class="hero-version">v1.0</div>
-                <h1>HubMusic</h1>
-            </div>
-        </section>
-
-        <div class="toolbar">
-            <div class="note">Actions apply immediately, but may take a few seconds to kick in. Please be patient.</div>
-            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-                <span id="global-status" class="status">Loading satellites...</span>
-                <button class="btn primary" id="refresh-btn">Refresh</button>
-            </div>
-        </div>
-
-        <section id="cards" class="cards"></section>
-    </div>
-
-    <div id="toast" class="toast"></div>
-
-    <script>
-        const HUB_MUSIC_TAB_ID = '__hubmusic__';
-        const HELPER_SERVICES = new Set(['airplay', 'dlna']);
-
-        const state = {
-            satellites: [],
-            controls: {},
-            draft: {},
-            capabilities: {},
-            activeSatelliteId: '',
-            hubMusic: {
-                active: false,
-                mode: 'single',
-                satellite: '',
-                satellite_alias: '',
-                satellite_host: '',
-                satellites: [],
-                exclude_satellite: '',
-                title: '',
-                source_url: '',
-                started_at: '',
-                last_action: 'idle',
-                last_error: '',
-                last_operation: '',
-                last_sent: [],
-                last_stopped: [],
-                last_failed: [],
-                last_retried: [],
-                history: [],
-                active_streams: [],
-                reachable_satellites: [],
-                reachable_count: 0,
-                configured_count: 0,
-                runtime_host: '',
-                runtime_port: 0,
-                desktop_audio: {
-                    available: false,
-                    reason: '',
-                    devices: [],
-                    preferred_device: null,
-                },
-                airplay: {
-                    enabled: false,
-                    running: false,
-                    pid: null,
-                    name: 'HubVoiceAirPlay',
-                    interface: '',
-                    started_at: '',
-                    last_error: '',
-                    script_present: false,
-                },
-                dlna: {
-                    enabled: false,
-                    running: false,
-                    friendly_name: 'HubVoiceDLNA',
-                    host: '',
-                    http_port: 0,
-                    device_url: '',
-                    transport_state: 'NO_MEDIA_PRESENT',
-                    last_uri: '',
-                    last_title: '',
-                    started_at: '',
-                    last_error: '',
-                },
-            },
-            hubMusicDraft: {
-                mode: 'all_reachable',
-                satellite: '',
-                stereoLeft: '',
-                stereoRight: '',
-                stereoVolume: null,
-                excludeSatellite: '',
-                stabilityMode: 'max',
-                autoLaunch: true,
-                selectedService: '',
-                radioPreset: '',
-                radioName: '',
-                radioUrl: '',
-            },
-            hubMusicBusy: false,
-            airplayBusy: false,
-            dlnaBusy: false,
-            hubMusicImportText: '',
-            hubMusicImportReport: [],
-        };
-        const levelApplyTimers = new Map();
-        const levelApplyInFlight = new Set();
-        const levelApplyPending = new Map();
-        let hubMusicStereoVolumeApplyTimer = null;
-        let hubMusicStereoVolumePending = null;
-        let hubMusicStereoVolumeInFlight = false;
-        let hubMusicStereoVolumeShowResultPending = false;
-        let backgroundRefreshInFlight = false;
-        let lastUserGestureAt = 0;
-        let hubMusicLastOperationSeen = null;
-        const DEFAULT_RADIO_PRESETS = [
-            { url: 'http://ice1.somafm.com/groovesalad-128-mp3', label: 'SomaFM: Groove Salad' },
-            { url: 'http://ice2.somafm.com/spacestation-128-mp3', label: 'SomaFM: Space Station' },
-            { url: 'http://ice3.somafm.com/dronezone-128-mp3', label: 'SomaFM: Drone Zone' },
-            { url: 'http://ice4.somafm.com/lush-128-mp3', label: 'SomaFM: Lush' },
-            { url: 'http://ice5.somafm.com/folkfwd-128-mp3', label: 'SomaFM: Folk Forward' },
-            { url: 'http://ice6.somafm.com/indiepop-128-mp3', label: 'SomaFM: Indie Pop Rocks' },
-            { url: 'http://ice1.somafm.com/thetrip-128-mp3', label: 'SomaFM: The Trip' },
-            { url: 'http://ice2.somafm.com/deepspaceone-128-mp3', label: 'SomaFM: Deep Space One' },
-            { url: 'http://ice3.somafm.com/illstreet-128-mp3', label: 'SomaFM: Ill Street Blues' },
-            { url: 'http://ice4.somafm.com/seventies-128-mp3', label: 'SomaFM: Seventies Lounge' },
-            { url: 'http://ice5.somafm.com/classical-128-mp3', label: 'SomaFM: Classical' },
-            { url: 'http://kexp-mp3-128.streamguys1.com/kexp128.mp3', label: 'KEXP 90.3 Seattle' },
-        ];
-
-        function escapeHtml(value) {
-            return String(value ?? '')
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;')
-                .replace(/'/g, '&#39;');
-        }
-
-        function markUserGesture() {
-            lastUserGestureAt = Date.now();
-        }
-
-        function hasRecentUserGesture(windowMs = 5000) {
-            return (Date.now() - lastUserGestureAt) <= windowMs;
-        }
-
-        function showToast(message, kind = 'good') {
-            const toast = document.getElementById('toast');
-            toast.textContent = message;
-            toast.className = `toast show ${kind}`;
-            window.clearTimeout(showToast._timer);
-            showToast._timer = window.setTimeout(() => {
-                toast.className = 'toast';
-            }, 2600);
-        }
-
-        async function api(path, options = {}) {
-            const timeoutMs = Number(options.timeoutMs ?? 20000);
-            const controller = new AbortController();
-            const timer = window.setTimeout(() => controller.abort(), Number.isFinite(timeoutMs) ? timeoutMs : 20000);
-            try {
-                const response = await fetch(path, {
-                    headers: { 'Content-Type': 'application/json' },
-                    ...options,
-                    signal: controller.signal,
-                });
-                const data = await response.json().catch(() => ({}));
-                if (!response.ok || data.ok === false) {
-                    throw new Error(data.error || data.message || `Request failed (${response.status})`);
-                }
-                return data;
-            } catch (error) {
-                if (error?.name === 'AbortError') {
-                    throw new Error('Request timed out. Check runtime connectivity and try again.');
-                }
-                throw error;
-            } finally {
-                window.clearTimeout(timer);
-            }
-        }
-
-        async function runHubMusicStereoTest() {
-            if (state.hubMusicBusy) {
-                return;
-            }
-            const draft = getHubMusicDraft();
-            if (draft.mode !== 'stereo_pair') {
-                showToast('Switch to Stereo Pair mode first.', 'bad');
-                return;
-            }
-            if (!draft.stereoLeft || !draft.stereoRight || draft.stereoLeft === draft.stereoRight) {
-                showToast('Choose two different satellites for left/right.', 'bad');
-                return;
-            }
-            state.hubMusicBusy = true;
-            renderCards();
-            try {
-                const body = {
-                    mode: 'stereo_pair',
-                    left_satellite: draft.stereoLeft,
-                    right_satellite: draft.stereoRight,
-                };
-                const data = await api('/hubmusic/stereo-test', { method: 'POST', body: JSON.stringify(body) });
-                state.hubMusic = { ...state.hubMusic, ...(data.status || {}) };
-                const sentCount = Array.isArray(data.sent) ? data.sent.length : 0;
-                showToast(sentCount === 2 ? 'Stereo channel test played (left then right).' : (data.message || 'Stereo test completed with warnings.'));
-            } catch (error) {
-                state.hubMusic.last_error = error.message;
-                showToast(error.message, 'bad');
-            } finally {
-                state.hubMusicBusy = false;
-                renderCards();
-            }
-        }
-
-        function queueHubMusicStereoVolumeApply(value, showResult = false) {
-            hubMusicStereoVolumePending = Math.max(0, Math.min(100, Number(value)));
-            if (showResult) {
-                hubMusicStereoVolumeShowResultPending = true;
-            }
-            if (hubMusicStereoVolumeApplyTimer) {
-                clearTimeout(hubMusicStereoVolumeApplyTimer);
-            }
-            hubMusicStereoVolumeApplyTimer = setTimeout(async () => {
-                if (hubMusicStereoVolumeInFlight) {
-                    // Let the in-flight request drain, then apply the latest pending value.
-                    return;
-                }
-                const vol = hubMusicStereoVolumePending;
-                hubMusicStereoVolumePending = null;
-                hubMusicStereoVolumeApplyTimer = null;
-                hubMusicStereoVolumeInFlight = true;
-                const draft = getHubMusicDraft();
-                const targets = Array.from(new Set([draft.stereoLeft, draft.stereoRight].filter(Boolean)));
-                if (!targets.length) {
-                    hubMusicStereoVolumeInFlight = false;
-                    return;
-                }
-                try {
-                    for (const satId of targets) {
-                        await api('/satellite-media-volume', {
-                            method: 'POST',
-                            timeoutMs: 10000,
-                            body: JSON.stringify({ satellite: satId, value: vol })
-                        });
-                        await new Promise((resolve) => setTimeout(resolve, 120));
-                    }
-                    if (hubMusicStereoVolumeShowResultPending) {
-                        showToast(`Paired volume set to ${vol}%`);
-                    }
-                } catch (error) {
-                    const message = error?.message || 'volume update failed';
-                    showToast('Volume error: ' + message, 'bad');
-                } finally {
-                    hubMusicStereoVolumeInFlight = false;
-                    hubMusicStereoVolumeShowResultPending = false;
-                    if (hubMusicStereoVolumePending !== null) {
-                        queueHubMusicStereoVolumeApply(hubMusicStereoVolumePending);
-                    }
-                }
-            }, 180);
-        }
-
-        function saveHubMusicStereoDefaults() {
-            const draft = getHubMusicDraft();
-            const left = String(draft.stereoLeft || '').trim();
-            const right = String(draft.stereoRight || '').trim();
-            const volume = Math.max(0, Math.min(100, Number(draft.stereoVolume ?? 50)));
-            savePersistedHubMusicStereoSettings({ left, right, volume });
-            api('/hubmusic/stereo-config', {
-                method: 'POST',
-                body: JSON.stringify({ left_satellite: left, right_satellite: right, volume_pct: volume })
-            }).then(() => {
-                state.hubMusic.stereo_left_default = left;
-                state.hubMusic.stereo_right_default = right;
-                state.hubMusic.stereo_volume_default = volume;
-            }).catch((err) => {
-                showToast('Save speakers failed: ' + (err.message || 'unknown error'), 'bad');
-            });
-        }
-
-        function hubMusicStereoSettingsStorageKey() {
-            return 'hubvoice:hubmusic_stereo_settings';
-        }
-
-        function loadPersistedHubMusicStereoSettings() {
-            try {
-                const raw = window.localStorage.getItem(hubMusicStereoSettingsStorageKey());
-                if (!raw) return {};
-                const parsed = JSON.parse(raw);
-                if (!parsed || typeof parsed !== 'object') return {};
-                const left = typeof parsed.left === 'string' ? parsed.left : '';
-                const right = typeof parsed.right === 'string' ? parsed.right : '';
-                const volumeRaw = Number(parsed.volume);
-                const volume = Number.isFinite(volumeRaw) ? Math.max(0, Math.min(100, volumeRaw)) : null;
-                return { left, right, volume };
-            } catch {
-                return {};
-            }
-        }
-
-        function savePersistedHubMusicStereoSettings({ left, right, volume }) {
-            try {
-                const payload = {
-                    left: String(left || ''),
-                    right: String(right || ''),
-                    volume: Math.max(0, Math.min(100, Number(volume ?? 50))),
-                };
-                window.localStorage.setItem(hubMusicStereoSettingsStorageKey(), JSON.stringify(payload));
-            } catch {
-                // Ignore storage errors (private mode/quota).
-            }
-        }
-
-        function speakerVolumeStorageKey(id) {
-            return `hubvoice:speaker_volume:${id}`;
-        }
-
-        function loadPersistedSpeakerVolume(id) {
-            try {
-                const raw = window.localStorage.getItem(speakerVolumeStorageKey(id));
-                if (raw == null) return null;
-                const parsed = Number(raw);
-                if (!Number.isFinite(parsed)) return null;
-                return parsed;
-            } catch {
-                return null;
-            }
-        }
-
-        function savePersistedSpeakerVolume(id, value) {
-            try {
-                window.localStorage.setItem(speakerVolumeStorageKey(id), String(value));
-            } catch {
-                // Ignore storage errors (private mode/quota).
-            }
-        }
-
-        function localLevelStorageKey(id, entity) {
-            return `hubvoice:${entity}:${id}`;
-        }
-
-        function loadPersistedLocalLevel(id, entity) {
-            try {
-                const raw = window.localStorage.getItem(localLevelStorageKey(id, entity));
-                if (raw == null || raw === '') return null;
-                const parsed = Number(raw);
-                if (!Number.isFinite(parsed)) return null;
-                return parsed;
-            } catch {
-                return null;
-            }
-        }
-
-        function savePersistedLocalLevel(id, entity, value) {
-            try {
-                window.localStorage.setItem(localLevelStorageKey(id, entity), String(value));
-            } catch {
-                // Ignore storage errors (private mode/quota).
-            }
-        }
-
-        function isEditingField() {
-            const active = document.activeElement;
-            if (!active || !(active instanceof HTMLElement)) {
-                return false;
-            }
-            return !!active.closest('[data-text], [data-input], [data-range], [data-hubmusic-field], [data-hubmusic-radio-name], [data-hubmusic-radio-url], [data-hubmusic-import], textarea, input, select');
-        }
-
-        function radioPresetsStorageKey() {
-            return 'hubvoice:radio_presets';
-        }
-
-        function hiddenBuiltInRadioPresetsStorageKey() {
-            return 'hubvoice:hidden_radio_presets';
-        }
-
-        function encodeRadioOption(option) {
-            return `${option.url}|${option.label}`;
-        }
-
-        function parseRadioOption(value) {
-            const parts = String(value || '').split('|');
-            return {
-                url: String(parts[0] || '').trim(),
-                label: String(parts.slice(1).join('|') || '').trim(),
-            };
-        }
-
-        function loadCustomRadioPresets() {
-            try {
-                const raw = window.localStorage.getItem(radioPresetsStorageKey());
-                if (!raw) return [];
-                const parsed = JSON.parse(raw);
-                if (!Array.isArray(parsed)) return [];
-                return parsed
-                    .map((item) => ({
-                        url: String(item?.url || '').trim(),
-                        label: String(item?.label || '').trim(),
-                    }))
-                    .filter((item) => item.url && item.label);
-            } catch {
-                return [];
-            }
-        }
-
-        function saveCustomRadioPresets(presets) {
-            try {
-                window.localStorage.setItem(radioPresetsStorageKey(), JSON.stringify(presets.slice(0, 30)));
-            } catch {
-                // Ignore storage errors.
-            }
-        }
-
-        function loadHiddenBuiltInRadioPresetUrls() {
-            try {
-                const raw = window.localStorage.getItem(hiddenBuiltInRadioPresetsStorageKey());
-                if (!raw) return [];
-                const parsed = JSON.parse(raw);
-                if (!Array.isArray(parsed)) return [];
-                return parsed
-                    .map((item) => String(item || '').trim().toLowerCase())
-                    .filter((item) => !!item);
-            } catch {
-                return [];
-            }
-        }
-
-        function saveHiddenBuiltInRadioPresetUrls(urls) {
-            try {
-                window.localStorage.setItem(hiddenBuiltInRadioPresetsStorageKey(), JSON.stringify(urls.slice(0, 50)));
-            } catch {
-                // Ignore storage errors.
-            }
-        }
-
-        function getRadioOptions() {
-            const hiddenBuiltIns = new Set(loadHiddenBuiltInRadioPresetUrls());
-            const builtIns = DEFAULT_RADIO_PRESETS.filter((item) => !hiddenBuiltIns.has(String(item?.url || '').trim().toLowerCase()));
-            const merged = [...builtIns, ...loadCustomRadioPresets()];
-            const seen = new Set();
-            const options = [];
-            for (const item of merged) {
-                const url = String(item?.url || '').trim();
-                const label = String(item?.label || '').trim();
-                if (!url || !label) continue;
-                const key = url.toLowerCase();
-                if (seen.has(key)) continue;
-                seen.add(key);
-                options.push({ url, label });
-            }
-            return options;
-        }
-
-        function saveRadioPresetIfRequested(name, url) {
-            const safeName = String(name || '').trim();
-            const safeUrl = String(url || '').trim();
-            if (!safeName || !safeUrl) return false;
-            const existing = getRadioOptions();
-            if (existing.some((item) => item.url.toLowerCase() === safeUrl.toLowerCase())) {
-                return false;
-            }
-            const custom = loadCustomRadioPresets();
-            custom.unshift({ url: safeUrl, label: safeName });
-            saveCustomRadioPresets(custom);
-            const hiddenBuiltIns = loadHiddenBuiltInRadioPresetUrls().filter((item) => item !== safeUrl.toLowerCase());
-            saveHiddenBuiltInRadioPresetUrls(hiddenBuiltIns);
-            return true;
-        }
-
-        function isCustomRadioPreset(optionValue) {
-            const selected = parseRadioOption(optionValue);
-            if (!selected.url) return false;
-            return loadCustomRadioPresets().some((item) => item.url.toLowerCase() === selected.url.toLowerCase());
-        }
-
-        function isBuiltInRadioPreset(optionValue) {
-            const selected = parseRadioOption(optionValue);
-            if (!selected.url) return false;
-            return DEFAULT_RADIO_PRESETS.some((item) => String(item?.url || '').trim().toLowerCase() === selected.url.toLowerCase());
-        }
-
-        function deleteCustomRadioPreset(optionValue) {
-            const selected = parseRadioOption(optionValue);
-            if (!selected.url) return false;
-            const custom = loadCustomRadioPresets();
-            const remaining = custom.filter((item) => item.url.toLowerCase() !== selected.url.toLowerCase());
-            if (remaining.length === custom.length) {
-                return false;
-            }
-            saveCustomRadioPresets(remaining);
-            return true;
-        }
-
-        function hideBuiltInRadioPreset(optionValue) {
-            const selected = parseRadioOption(optionValue);
-            if (!selected.url || !isBuiltInRadioPreset(optionValue)) return false;
-            const hidden = loadHiddenBuiltInRadioPresetUrls();
-            const key = selected.url.toLowerCase();
-            if (hidden.includes(key)) {
-                return false;
-            }
-            hidden.push(key);
-            saveHiddenBuiltInRadioPresetUrls(hidden);
-            return true;
-        }
-
-        function canDeleteRadioPreset(optionValue) {
-            return !!parseRadioOption(optionValue).url;
-        }
-
-        function getDraft(id) {
-            if (!state.draft[id]) {
-                state.draft[id] = {
-                    whisper_mode: false,
-                    follow_up_listening_switch: false,
-                    speaker_muted: false,
-                    wake_muted: false,
-                    wake_previous: state.controls.wake_sound_volume?.default ?? 65,
-                    speaker_volume: state.controls.speaker_volume?.default ?? 65,
-                    wake_sound_volume: state.controls.wake_sound_volume?.default ?? 65,
-                    whisper_volume_pct: state.controls.whisper_volume_pct?.default ?? 20,
-                    follow_up_listen_window_seconds: state.controls.follow_up_listen_window_seconds?.default ?? 2,
-                    text: ''
-                };
-                const persistedSpeaker = loadPersistedSpeakerVolume(id);
-                if (persistedSpeaker != null) {
-                    const meta = state.controls.speaker_volume || { min: 0, max: 100 };
-                    state.draft[id].speaker_volume = Math.max(meta.min, Math.min(meta.max, persistedSpeaker));
-                }
-                const persistedLevelEntities = ['bass_level', 'treble_level', 'wake_sound_volume', 'whisper_volume_pct'];
-                for (const entity of persistedLevelEntities) {
-                    const persisted = loadPersistedLocalLevel(id, entity);
-                    if (persisted == null) continue;
-                    const meta = state.controls[entity] || { min: 0, max: 100 };
-                    state.draft[id][entity] = Math.max(meta.min, Math.min(meta.max, persisted));
-                }
-            }
-            return state.draft[id];
-        }
-
-        function setGlobalStatus(message, kind = '') {
-            const el = document.getElementById('global-status');
-            el.textContent = message;
-            el.className = `status ${kind}`.trim();
-        }
-
-        function supportsControl(id, entity) {
-            const caps = state.capabilities[id];
-            if (!caps || !caps.supports) return true;
-            if (!(entity in caps.supports)) return true;
-            return !!caps.supports[entity];
-        }
-
-        function isControlSettable(id, entity) {
-            const meta = state.controls[entity];
-            if (!meta || meta.settable === false) return false;
-            // These controls are runtime-backed even when the number entity is not exposed by firmware.
-            if (entity === 'speaker_volume' || entity === 'bass_level' || entity === 'treble_level') return true;
-            return supportsControl(id, entity);
-        }
-
-        function syncRange(id, entity, value) {
-            const draft = getDraft(id);
-            draft[entity] = Number(value);
-            if (entity === 'speaker_volume') {
-                savePersistedSpeakerVolume(id, draft[entity]);
-            }
-            if (entity === 'bass_level' || entity === 'treble_level' || entity === 'wake_sound_volume' || entity === 'whisper_volume_pct') {
-                savePersistedLocalLevel(id, entity, draft[entity]);
-            }
-            if (entity === 'wake_sound_volume') {
-                const wakeMin = state.controls.wake_sound_volume?.min ?? 0;
-                draft.wake_muted = Number(value) <= wakeMin;
-                if (Number(value) > wakeMin) {
-                    draft.wake_previous = Number(value);
-                }
-            }
-            const range = document.querySelector(`[data-range="${id}:${entity}"]`);
-            const input = document.querySelector(`[data-input="${id}:${entity}"]`);
-            if (range && document.activeElement !== range) range.value = String(value);
-            if (input && document.activeElement !== input) input.value = String(value);
-        }
-
-        function getControlAction(id, entity) {
-            const draft = getDraft(id);
-            if (entity === 'speaker_volume') {
-                return { kind: 'speaker-mute', label: 'Mute', active: !!draft.speaker_muted };
-            }
-            if (entity === 'wake_sound_volume') {
-                return { kind: 'wake-mute', label: 'Mute', active: !!draft.wake_muted };
-            }
-            if (entity === 'whisper_volume_pct') {
-                return { kind: 'switch', label: 'Whisper', active: !!draft.whisper_mode, entity: 'whisper_mode' };
-            }
-            if (entity === 'follow_up_listen_window_seconds') {
-                if (!supportsControl(id, 'follow_up_listening_switch')) {
-                    return null;
-                }
-                return { kind: 'switch', label: 'Listen', active: !!draft.follow_up_listening_switch, entity: 'follow_up_listening_switch' };
-            }
-            return null;
-        }
-
-        function renderTabs() {
-            return `
-                <div class="sat-tabs">
-                    <button class="sat-tab${state.activeSatelliteId === HUB_MUSIC_TAB_ID ? ' active' : ''}" data-satellite-tab="${HUB_MUSIC_TAB_ID}">HubMusic</button>
-                    ${state.satellites.map((satellite) => {
-                        const label = satellite.alias || satellite.id;
-                        const active = satellite.id === state.activeSatelliteId;
-                        return `<button class="sat-tab${active ? ' active' : ''}" data-satellite-tab="${escapeHtml(satellite.id)}">${escapeHtml(label)}</button>`;
-                    }).join('')}
-                </div>
-            `;
-        }
-
-        function getHubMusicDraft() {
-            const draft = state.hubMusicDraft;
-            const persistedStereo = loadPersistedHubMusicStereoSettings();
-            if (!draft.satellite) {
-                draft.satellite = state.hubMusic.satellite
-                    || state.satellites.find((satellite) => satellite.reachable)?.id
-                    || state.satellites[0]?.id
-                    || '';
-            }
-            if (!draft.mode) {
-                draft.mode = state.hubMusic.mode || 'all_reachable';
-            }
-            if (!draft.stereoLeft) {
-                draft.stereoLeft = persistedStereo.left
-                    || state.hubMusic.stereo_left_default
-                    || state.hubMusic.satellites?.find((satellite) => String(satellite?.channel || '').toLowerCase() === 'left')?.id
-                    || state.satellites.find((satellite) => satellite.reachable)?.id
-                    || state.satellites[0]?.id
-                    || '';
-            }
-            if (!draft.stereoRight) {
-                draft.stereoRight = persistedStereo.right
-                    || state.hubMusic.stereo_right_default
-                    || state.hubMusic.satellites?.find((satellite) => String(satellite?.channel || '').toLowerCase() === 'right')?.id
-                    || state.satellites.find((satellite) => satellite.reachable && satellite.id !== draft.stereoLeft)?.id
-                    || state.satellites.find((satellite) => satellite.id !== draft.stereoLeft)?.id
-                    || draft.stereoLeft
-                    || '';
-            }
-            const draftStereoVolumeRaw = draft.stereoVolume;
-            const hasDraftStereoVolume = !(
-                draftStereoVolumeRaw === null
-                || draftStereoVolumeRaw === undefined
-                || String(draftStereoVolumeRaw).trim() === ''
-            );
-            if (!hasDraftStereoVolume || !Number.isFinite(Number(draftStereoVolumeRaw))) {
-                const configVolumeRaw = Number(state.hubMusic.stereo_volume_default);
-                if (Number.isFinite(Number(persistedStereo.volume))) {
-                    draft.stereoVolume = Number(persistedStereo.volume);
-                } else if (Number.isFinite(configVolumeRaw)) {
-                    draft.stereoVolume = Math.max(0, Math.min(100, configVolumeRaw));
-                } else {
-                    draft.stereoVolume = 50;
-                }
-            }
-            if (!draft.excludeSatellite && state.hubMusic.exclude_satellite) {
-                draft.excludeSatellite = state.hubMusic.exclude_satellite;
-            }
-            if (!draft.stabilityMode) {
-                draft.stabilityMode = 'max';
-            }
-            if (typeof draft.autoLaunch !== 'boolean') {
-                draft.autoLaunch = true;
-            }
-            if (typeof draft.radioName !== 'string') {
-                draft.radioName = '';
-            }
-            if (typeof draft.radioUrl !== 'string') {
-                draft.radioUrl = '';
-            }
-            return draft;
-        }
-
-        function formatTimestamp(value) {
-            if (!value) return 'Not started';
-            const date = new Date(value);
-            if (Number.isNaN(date.getTime())) return value;
-            return date.toLocaleString();
-        }
-
-        function formatHistoryTime(value) {
-            if (!value) return '';
-            const date = new Date(value);
-            if (Number.isNaN(date.getTime())) return value;
-            return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
-        }
-
-        function labelForTarget(item) {
-            const alias = String(item?.alias || '').trim();
-            const id = String(item?.id || '').trim();
-            return alias || id || 'satellite';
-        }
-
-        function renderTargetPills(items, kind) {
-            if (!Array.isArray(items) || !items.length) {
-                return '<div class="control-note">None</div>';
-            }
-            return `<div class="hubmusic-pill-row">${items.map((item) => {
-                const title = labelForTarget(item);
-                const err = item?.error ? `: ${item.error}` : '';
-                const attempt = item?.attempt ? ` (attempt ${item.attempt})` : '';
-                const durationMs = Number(item?.duration_ms || 0);
-                const timing = durationMs > 0 ? ` ${durationMs}ms` : '';
-                return `<span class="hubmusic-pill ${kind}" title="${escapeHtml(title + err + timing)}">${escapeHtml(title + attempt + timing)}</span>`;
-            }).join('')}</div>`;
-        }
-
-        function renderHistoryList(entries) {
-            if (!Array.isArray(entries) || !entries.length) {
-                return '<div class="control-note">No HubMusic operations yet.</div>';
-            }
-            return `<div class="hubmusic-history-list">${entries.map((entry) => {
-                const op = String(entry?.operation || 'unknown').toUpperCase();
-                const mode = String(entry?.mode || 'single');
-                const sent = Number(entry?.sent_count || 0);
-                const stopped = Number(entry?.stopped_count || 0);
-                const failed = Number(entry?.failed_count || 0);
-                const retried = Number(entry?.retried_count || 0);
-                const excluded = String(entry?.exclude_satellite || '');
-                return `<div class="hubmusic-history-item">
-                    <div class="hubmusic-history-main">
-                        <span>${escapeHtml(op)}</span>
-                        <span>${escapeHtml(formatHistoryTime(entry?.timestamp))}</span>
-                    </div>
-                    <div class="hubmusic-history-meta">
-                        mode=${escapeHtml(mode)} · sent=${sent} · stopped=${stopped} · retried=${retried} · failed=${failed}${excluded ? ` · excluded=${escapeHtml(excluded)}` : ''}
-                    </div>
-                </div>`;
-            }).join('')}</div>`;
-        }
-
-        function renderVerifyReport(items) {
-            if (!Array.isArray(items) || !items.length) {
-                return '<div class="control-note">No snapshot validation run yet.</div>';
-            }
-            return `<div class="hubmusic-verify-report">${items.map((item) => {
-                const kind = item?.level === 'error' ? 'bad' : (item?.level === 'warn' ? 'warn' : 'good');
-                const prefix = item?.level === 'error' ? 'ERROR' : (item?.level === 'warn' ? 'WARN' : 'OK');
-                return `<div class="hubmusic-verify-row ${kind}">${escapeHtml(prefix + ': ' + String(item?.message || ''))}</div>`;
-            }).join('')}</div>`;
-        }
-
-        function renderHubMusicCard() {
-            const draft = getHubMusicDraft();
-            const reachable = state.hubMusic.reachable_satellites || [];
-            const desktopAudio = state.hubMusic.desktop_audio || { available: false, devices: [], reason: '' };
-            const isActive = !!state.hubMusic.active;
-            const statusClass = isActive ? 'good' : '';
-            const statusText = isActive ? 'Playing' : 'Ready';
-
-            const SERVICES = [
-                { id: 'pandora',  label: 'Pandora',       relay: true,  openUrl: 'https://www.pandora.com/' },
-                { id: 'spotify',  label: 'Spotify',       relay: true,  openUrl: 'https://open.spotify.com/' },
-                { id: 'youtube',  label: 'YouTube Music', relay: true,  openUrl: 'https://music.youtube.com/' },
-                { id: 'radio',    label: 'Internet Radio', relay: false, openUrl: null },
-                { id: 'airplay',  label: 'AirPlay',       relay: false, openUrl: null },
-                { id: 'dlna',     label: 'DLNA',          relay: false, openUrl: null },
-                { id: 'phone',    label: 'Bluetooth',     relay: true,  openUrl: null },
-            ];
-
-            const RELAY_SERVICES = ['pandora', 'spotify', 'youtube', 'phone'];
-
-            function serviceHint(serviceId) {
-                if (RELAY_SERVICES.includes(serviceId) && !desktopAudio.available) {
-                    return `<div class="control-note" style="color:rgba(255,184,77,0.9)">${escapeHtml(desktopAudio.reason || 'Desktop audio capture unavailable on this PC. Install sounddevice to enable.')}</div>`;
-                }
-                const hints = {
-                    pandora:  "Play Pandora in your browser \u2014 or on your phone through this PC's audio \u2014 then click Start.",
-                    spotify:  "Play Spotify in your browser \u2014 or on your phone through this PC's audio \u2014 then click Start.",
-                    youtube:  "Play YouTube Music in your browser \u2014 or on your phone through this PC's audio \u2014 then click Start.",
-                    phone:    "Pair your Bluetooth audio source to this computer to start streaming.",
-                    radio:    "Choose a saved station or enter Name + URL, then click Start.",
-                    airplay:  "Start the receiver, choose satellites below, then press Start to route AirPlay audio to them.",
-                    dlna:     "Start the DLNA renderer, choose satellites below, then press Start to arm routing for the next cast. For best stability set your sender output format to MP3.",
-                };
-                return `<div class="control-note">${hints[serviceId] || ''}</div>`;
-            }
-
-            const radioOptions = getRadioOptions();
-            if (draft.radioPreset && !radioOptions.some((opt) => encodeRadioOption(opt) === draft.radioPreset) && !draft.radioUrl.trim()) {
-                draft.radioPreset = '';
-            }
-            const canDeleteSelectedRadioPreset = draft.selectedService === 'radio' && canDeleteRadioPreset(draft.radioPreset);
-            const canSaveSelectedRadioPreset = draft.selectedService === 'radio' && !!draft.radioName.trim() && !!draft.radioUrl.trim();
-
-            const serviceDetail = draft.selectedService ? `
-                <div class="hubmusic-service-detail">
-                    ${serviceHint(draft.selectedService)}
-                    ${draft.selectedService === 'airplay' ? `
-                        <div style="margin-top:6px;">
-                            <section class="section" style="margin-bottom:0;">
-                                <h3 style="margin-top:0;">Receiver Control</h3>
-                                <div class="hubmusic-active-summary" style="margin-bottom:10px;">
-                                    <span class="chip ${state.hubMusic.airplay?.running ? 'good' : ''}">${state.hubMusic.airplay?.running ? 'AirPlay Running' : 'AirPlay Stopped'}</span>
-                                    ${state.hubMusic.airplay?.started_at ? `<span class="chip">${escapeHtml(formatTimestamp(state.hubMusic.airplay.started_at))}</span>` : ''}
-                                </div>
-                                <div class="hubmusic-service-grid">
-                                    <button class="btn ${state.hubMusic.airplay?.running ? 'ghost' : 'primary'}" type="button" data-airplay-start ${state.hubMusic.airplay?.running || state.airplayBusy ? 'disabled' : ''}>${state.airplayBusy ? 'Working...' : 'Start AirPlay'}</button>
-                                    <button class="btn ghost" type="button" data-airplay-stop ${!state.hubMusic.airplay?.running || state.airplayBusy ? 'disabled' : ''}>Stop AirPlay</button>
-                                </div>
-                                <div class="control-note" style="margin-top:8px;">On iPhone: open Control Center, tap AirPlay, choose ${escapeHtml(state.hubMusic.airplay?.name || 'HubVoiceAirPlay')}.</div>
-                                ${state.hubMusic.airplay?.interface ? `<div class="control-note">Auto-detected interface: ${escapeHtml(state.hubMusic.airplay.interface)}</div>` : ''}
-                                ${state.hubMusic.airplay?.last_error ? `<div class="control-note" style="color:rgba(239,107,115,0.9)">${escapeHtml(state.hubMusic.airplay.last_error)}</div>` : ''}
-                            </section>
-                        </div>
-                    ` : draft.selectedService === 'dlna' ? `
-                        <div style="margin-top:6px;">
-                            <section class="section" style="margin-bottom:0;">
-                                <h3 style="margin-top:0;">DLNA Renderer</h3>
-                                <div class="hubmusic-active-summary" style="margin-bottom:10px;">
-                                    <span class="chip ${state.hubMusic.dlna?.running ? 'good' : ''}">${state.hubMusic.dlna?.running ? 'DLNA Running' : 'DLNA Stopped'}</span>
-                                    <span class="chip">${escapeHtml(state.hubMusic.dlna?.transport_state || 'NO_MEDIA_PRESENT')}</span>
-                                    ${state.hubMusic.dlna?.started_at ? `<span class="chip">${escapeHtml(formatTimestamp(state.hubMusic.dlna.started_at))}</span>` : ''}
-                                </div>
-                                <div class="hubmusic-service-grid">
-                                    <button class="btn ${state.hubMusic.dlna?.running ? 'ghost' : 'primary'}" type="button" data-dlna-start ${state.hubMusic.dlna?.running || state.dlnaBusy ? 'disabled' : ''}>${state.dlnaBusy ? 'Working...' : 'Start DLNA'}</button>
-                                    <button class="btn ghost" type="button" data-dlna-stop ${!state.hubMusic.dlna?.running || state.dlnaBusy ? 'disabled' : ''}>Stop DLNA</button>
-                                </div>
-                                <div class="control-note" style="margin-top:8px;">On Android, choose ${escapeHtml(state.hubMusic.dlna?.friendly_name || 'HubVoiceDLNA')} from a DLNA or Play To app.</div>
-                                <div class="control-note">Recommended sender format: MP3 for the most stable connection.</div>
-                                ${state.hubMusic.dlna?.device_url ? `<div class="control-note">Renderer URL: ${escapeHtml(state.hubMusic.dlna.device_url)}</div>` : ''}
-                                ${state.hubMusic.dlna?.last_title ? `<div class="control-note"><strong>Playing:</strong> ${escapeHtml(state.hubMusic.dlna.last_title)}</div>` : ''}
-                                ${state.hubMusic.dlna?.last_artist ? `<div class="control-note"><strong>Artist:</strong> ${escapeHtml(state.hubMusic.dlna.last_artist)}</div>` : ''}
-                                ${state.hubMusic.dlna?.last_album ? `<div class="control-note"><strong>Album:</strong> ${escapeHtml(state.hubMusic.dlna.last_album)}</div>` : ''}
-                                ${state.hubMusic.dlna?.last_error ? `<div class="control-note" style="color:rgba(239,107,115,0.9)">${escapeHtml(state.hubMusic.dlna.last_error)}</div>` : ''}
-                            </section>
-                        </div>
-                    ` : draft.selectedService === 'radio' ? `
-                        <div class="mode-row" style="margin-top:6px;align-items:center;">
-                            <select data-hubmusic-radio-preset>
-                                <option value="">— Select a station —</option>
-                                ${radioOptions.map(opt => `<option value="${escapeHtml(encodeRadioOption(opt))}" ${draft.radioPreset === encodeRadioOption(opt) ? 'selected' : ''}>${escapeHtml(opt.label)}</option>`).join('')}
-                            </select>
-                        </div>
-                        <div class="mode-row" style="margin-top:8px;">
-                            <input type="text" data-hubmusic-radio-name placeholder="Station name (e.g. Chill Lounge)" value="${escapeHtml(draft.radioName)}">
-                            <input type="url" data-hubmusic-radio-url placeholder="https://stream.example.com/radio.mp3" value="${escapeHtml(draft.radioUrl)}">
-                        </div>
-                        <div class="hubmusic-service-grid" style="margin-top:6px;margin-bottom:0;">
-                            <button class="btn ghost" type="button" data-hubmusic-radio-save-btn ${canSaveSelectedRadioPreset ? '' : 'disabled'}>Save this name/url</button>
-                            <button class="btn ghost" type="button" data-hubmusic-radio-delete ${canDeleteSelectedRadioPreset ? '' : 'disabled'}>Delete Preset</button>
-                        </div>
-                    ` : ''}
-                </div>
-            ` : `<div class="control-note">Pick a service above to get started.</div>`;
-
-            const hasRadioSource = !!draft.radioUrl.trim() || !!draft.radioPreset;
-            const hasTargets = draft.mode === 'all_reachable'
-                ? reachable.length > 0
-                : (draft.mode === 'stereo_pair'
-                    ? !!draft.stereoLeft && !!draft.stereoRight && draft.stereoLeft !== draft.stereoRight
-                    : !!draft.satellite);
-            const helperReady = (draft.selectedService === 'airplay' && !!state.hubMusic.airplay?.running)
-                || (draft.selectedService === 'dlna' && !!state.hubMusic.dlna?.running);
-            const canStart = !!draft.selectedService
-                && hasTargets
-                && ((HELPER_SERVICES.has(draft.selectedService) && helperReady)
-                    || (!HELPER_SERVICES.has(draft.selectedService) && (draft.selectedService !== 'radio' || hasRadioSource)));
-            const startDisabled = !canStart || !!state.hubMusicBusy;
-            const stopDisabled = !isActive || !!state.hubMusicBusy;
-            const startLabel = draft.selectedService === 'dlna'
-                ? (state.hubMusic.dlna?.running ? '✓ Route Armed' : '▶ Arm Route')
-                : (draft.selectedService === 'airplay' ? '▶ Play AirPlay' : '▶ Start');
-
-            return `
-                <article class="panel card">
-                    <header class="card-header">
-                        <div>
-                            <h2 class="card-title">HubMusic</h2>
-                            <div class="card-subtitle">Stream music to your satellites.</div>
-                        </div>
-                        <span class="status ${statusClass}">${statusText}</span>
-                    </header>
-                    <div class="hubmusic-form">
-                        <section class="section">
-                            <h3>1. Pick a Service</h3>
-                            <div class="hubmusic-service-grid">
-                                ${SERVICES.map(svc => `<button class="btn ${draft.selectedService === svc.id ? 'primary' : 'ghost'}" data-hubmusic-service="${escapeHtml(svc.id)}">${escapeHtml(svc.label)}</button>`).join('')}
-                            </div>
-                            <label class="control-note" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-                                <span>Launch</span>
-                                <input type="checkbox" data-hubmusic-launch-toggle ${draft.autoLaunch ? 'checked' : ''}>
-                            </label>
-                            ${serviceDetail}
-                            <div class="control-row" style="margin-top:8px;">
-                                <label class="control-title"><span>Stability</span><span>Higher buffering reduces skips</span></label>
-                                <select data-hubmusic-stability>
-                                    <option value="balanced" ${draft.stabilityMode === 'balanced' ? 'selected' : ''}>Balanced</option>
-                                    <option value="max" ${draft.stabilityMode === 'max' ? 'selected' : ''}>Max Stability</option>
-                                </select>
-                            </div>
-                        </section>
-                        <section class="section">
-                            <h3>2. Play On</h3>
-                            <div class="hubmusic-sat-grid">
-                                <button class="btn ${draft.mode === 'all_reachable' ? 'primary' : 'ghost'}" data-hubmusic-mode-btn="all_reachable">All Satellites <span class="chip">${reachable.length}</span></button>
-                                <button class="btn ${draft.mode === 'stereo_pair' ? 'primary' : 'ghost'}" data-hubmusic-mode-btn="stereo_pair">Stereo Pair</button>
-                                ${state.satellites.map(sat => {
-                                    const isSel = draft.mode === 'single' && draft.satellite === sat.id;
-                                    const label = (sat.alias || sat.id) + (sat.reachable ? '' : ' (offline)');
-                                    return `<button class="btn ${isSel ? 'primary' : 'ghost'}" data-hubmusic-mode-btn="single" data-hubmusic-sat-select="${escapeHtml(sat.id)}">${escapeHtml(label)}</button>`;
-                                }).join('')}
-                            </div>
-                            ${draft.mode === 'stereo_pair' ? `
-                                <div class="control-row">
-                                    <label class="control-title"><span>Left Speaker</span><span>Channel L</span></label>
-                                    <select data-hubmusic-stereo-left>
-                                        ${state.satellites.map(sat => {
-                                            const selected = sat.id === draft.stereoLeft ? 'selected' : '';
-                                            const label = (sat.alias || sat.id) + (sat.reachable ? '' : ' (offline)');
-                                            return `<option value="${escapeHtml(sat.id)}" ${selected}>${escapeHtml(label)}</option>`;
-                                        }).join('')}
-                                    </select>
-                                </div>
-                                <div class="control-row">
-                                    <label class="control-title"><span>Right Speaker</span><span>Channel R</span></label>
-                                    <select data-hubmusic-stereo-right>
-                                        ${state.satellites.map(sat => {
-                                            const selected = sat.id === draft.stereoRight ? 'selected' : '';
-                                            const label = (sat.alias || sat.id) + (sat.reachable ? '' : ' (offline)');
-                                            return `<option value="${escapeHtml(sat.id)}" ${selected}>${escapeHtml(label)}</option>`;
-                                        }).join('')}
-                                    </select>
-                                </div>
-                                <div class="control-row">
-                                    <label class="control-title"><span>Paired Volume</span><span>Both speakers</span></label>
-                                    <div style="display:flex;align-items:center;gap:8px;">
-                                        <input type="range" min="0" max="100" step="1" value="${draft.stereoVolume ?? 50}" data-hubmusic-stereo-volume style="width:380px;flex:none;">
-                                        <span style="min-width:2.8em;text-align:right;font-variant-numeric:tabular-nums">${draft.stereoVolume ?? 50}%</span>
-                                        <button class="btn ghost" data-hubmusic-stereo-test ${state.hubMusicBusy ? 'disabled' : ''} style="margin-left:auto;">Channel Test</button>
-                                    </div>
-                                </div>
-                                ${draft.stereoLeft && draft.stereoRight && draft.stereoLeft === draft.stereoRight
-                                    ? '<div class="control-note" style="color:rgba(239,107,115,0.9)">Left and right must be different satellites.</div>'
-                                    : ''}
-                            ` : ''}
-                            ${draft.mode === 'all_reachable' && reachable.length > 1 ? `
-                                <div class="control-row">
-                                    <label class="control-title"><span>Exclude</span><span>Skip one satellite</span></label>
-                                    <select data-hubmusic-exclude>
-                                        <option value="">None</option>
-                                        ${reachable.map(sat => `<option value="${escapeHtml(sat.id)}" ${draft.excludeSatellite === sat.id ? 'selected' : ''}>${escapeHtml(sat.alias || sat.id)}</option>`).join('')}
-                                    </select>
-                                </div>
-                            ` : ''}
-                        </section>
-                        <div class="hubmusic-actions">
-                            <button class="btn primary" data-hubmusic-service-start ${startDisabled ? 'disabled' : ''}>${state.hubMusicBusy ? 'Starting...' : startLabel}</button>
-                            <button class="btn ghost" data-hubmusic-service-stop ${stopDisabled ? 'disabled' : ''}>${state.hubMusicBusy ? 'Working...' : '■ Stop'}</button>
-                        </div>
-                        ${isActive ? `
-                            <div class="hubmusic-active-summary">
-                                <span class="chip good">▶ ${escapeHtml(state.hubMusic.title || 'Playing')}</span>
-                                <span class="chip">${state.hubMusic.mode === 'all_reachable'
-                                    ? (state.hubMusic.satellites || []).length + ' satellites'
-                                    : (state.hubMusic.mode === 'stereo_pair'
-                                        ? 'Stereo pair'
-                                        : escapeHtml(state.hubMusic.satellite_alias || state.hubMusic.satellite || ''))}</span>
-                                <span class="chip">${escapeHtml(formatTimestamp(state.hubMusic.started_at))}</span>
-                                ${(state.hubMusic.active_streams || []).map(item => `<span class="chip ${item.mode === 'tone' ? 'good' : ''}">${escapeHtml((item.satellite || '?') + ': ' + formatStreamStatusLabel(item))}</span>`).join('')}
-                            </div>
-                        ` : ''}
-                        ${state.hubMusic.last_error ? `<div class="control-note" style="color:rgba(239,107,115,0.9)">${escapeHtml(state.hubMusic.last_error)}</div>` : ''}
-                    </div>
-                </article>
-            `;
-        }
-
-        function renderAirPlayCard() {
-            const airplay = state.hubMusic.airplay || { running: false, name: 'HubVoiceAirPlay', interface: '', last_error: '' };
-            const statusClass = airplay.running ? 'good' : '';
-            const statusText = airplay.running ? 'Running' : 'Stopped';
-            return `
-                <article class="panel card">
-                    <header class="card-header">
-                        <div>
-                            <h2 class="card-title">AirPlay Receiver</h2>
-                            <div class="card-subtitle">Optional iPhone/iPad ingress for HubMusic.</div>
-                        </div>
-                        <span class="status ${statusClass}">${statusText}</span>
-                    </header>
-                    <div class="hubmusic-form">
-                        <section class="section">
-                            <h3>Receiver Control</h3>
-                            <div class="hubmusic-service-grid">
-                                <button class="btn ${airplay.running ? 'ghost' : 'primary'}" type="button" data-airplay-start ${airplay.running || state.airplayBusy ? 'disabled' : ''}>${state.airplayBusy ? 'Working...' : 'Start AirPlay'}</button>
-                                <button class="btn ghost" type="button" data-airplay-stop ${!airplay.running || state.airplayBusy ? 'disabled' : ''}>Stop AirPlay</button>
-                            </div>
-                            <div class="control-note" style="margin-top:8px;">On iPhone: open Control Center, tap AirPlay, choose ${escapeHtml(airplay.name || 'HubVoiceAirPlay')}.</div>
-                            ${airplay.interface ? `<div class="control-note">Auto-detected interface: ${escapeHtml(airplay.interface)}</div>` : ''}
-                            ${airplay.last_error ? `<div class="control-note" style="color:rgba(239,107,115,0.9)">${escapeHtml(airplay.last_error)}</div>` : ''}
-                        </section>
-                    </div>
-                </article>
-            `;
-        }
-
-        // --- dead code kept for reference, replaced by renderHubMusicCard above ---
-        function _legacyHubMusicCard_unused() {
-            const draft = getHubMusicDraft();
-            const reachable = state.hubMusic.reachable_satellites || [];
-            const desktopAudio = state.hubMusic.desktop_audio || { available: false, devices: [], reason: '' };
-            const statusClass = state.hubMusic.active ? 'good' : '';
-            const statusText = state.hubMusic.active ? 'Active Route' : 'Ready';
-            const selectedSatellite = state.satellites.find((satellite) => satellite.id === draft.satellite);
-            const activeTargets = state.hubMusic.satellites || [];
-            const activeSatelliteLabel = state.hubMusic.mode === 'all_reachable'
-                ? `${activeTargets.length || state.hubMusic.reachable_count || 0} targets`
-                : (state.hubMusic.satellite_alias || state.hubMusic.satellite || 'None selected');
-            return `
-                <article class="panel card">
-                    <header class="card-header">
-                        <div>
-                            <h2 class="card-title">HubMusic</h2>
-                            <div class="card-subtitle">Route a direct audio URL through HubVoice into a Satellite-1 media player.</div>
-                        </div>
-                        <span class="status ${statusClass}">${statusText}</span>
-                    </header>
-
-                    <div class="control-deck">
-                        <div class="main-column">
-                            <section class="section">
-                                <div class="section-head">
-                                    <h3>Route Source</h3>
-                                    <span class="chip">${reachable.length}/${state.hubMusic.configured_count || state.satellites.length} reachable</span>
-                                </div>
-                                <div class="hubmusic-form">
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Route Mode</span>
-                                            <span>${draft.mode === 'all_reachable' ? 'All reachable satellites' : 'Single satellite'}</span>
-                                        </label>
-                                        <select data-hubmusic-mode>
-                                            <option value="single" ${draft.mode === 'single' ? 'selected' : ''}>Single satellite</option>
-                                            <option value="all_reachable" ${draft.mode === 'all_reachable' ? 'selected' : ''}>All reachable satellites</option>
-                                        </select>
-                                    </div>
-                                    <div class="control-row" ${draft.mode === 'all_reachable' ? 'style="opacity:0.7;"' : ''}>
-                                        <label class="control-title">
-                                            <span>Target Satellite</span>
-                                            <span>${selectedSatellite?.host || state.hubMusic.satellite_host || 'Select a destination'}</span>
-                                        </label>
-                                        <select data-hubmusic-target ${draft.mode === 'all_reachable' ? 'disabled' : ''}>
-                                            ${state.satellites.map((satellite) => {
-                                                const selected = satellite.id === draft.satellite ? 'selected' : '';
-                                                const label = satellite.alias || satellite.id;
-                                                const reach = satellite.reachable ? 'reachable' : 'offline';
-                                                return `<option value="${escapeHtml(satellite.id)}" ${selected}>${escapeHtml(label)} (${reach})</option>`;
-                                            }).join('')}
-                                        </select>
-                                    </div>
-                                    <div class="control-row" ${draft.mode === 'all_reachable' ? '' : 'style="opacity:0.7;"'}>
-                                        <label class="control-title">
-                                            <span>Exclude Satellite</span>
-                                            <span>${draft.mode === 'all_reachable' ? 'Optional skip target' : 'Only used in all-reachable mode'}</span>
-                                        </label>
-                                        <select data-hubmusic-exclude ${draft.mode === 'all_reachable' ? '' : 'disabled'}>
-                                            <option value="">None</option>
-                                            ${reachable.map((satellite) => {
-                                                const selected = satellite.id === draft.excludeSatellite ? 'selected' : '';
-                                                const label = satellite.alias || satellite.id;
-                                                return `<option value="${escapeHtml(satellite.id)}" ${selected}>${escapeHtml(label)}</option>`;
-                                            }).join('')}
-                                        </select>
-                                    </div>
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Station Preset</span>
-                                            <span>Pick a free internet radio station</span>
-                                        </label>
-                                        <select data-hubmusic-preset>
-                                            <option value="">— Choose a preset or enter URL below —</option>
-                                            <optgroup label="SomaFM">
-                                                <option value="https://ice1.somafm.com/groovesalad-256-mp3|SomaFM: Groove Salad">Groove Salad (Ambient/Electronic)</option>
-                                                <option value="https://ice2.somafm.com/spacestation-256-mp3|SomaFM: Space Station">Space Station (Ambient)</option>
-                                                <option value="https://ice3.somafm.com/dronezone-256-mp3|SomaFM: Drone Zone">Drone Zone (Atmospheric)</option>
-                                                <option value="https://ice4.somafm.com/lush-256-mp3|SomaFM: Lush">Lush (Chillout/Downtempo)</option>
-                                                <option value="https://ice5.somafm.com/folkfwd-256-mp3|SomaFM: Folk Forward">Folk Forward (Folk/Indie)</option>
-                                                <option value="https://ice6.somafm.com/indiepop-256-mp3|SomaFM: Indie Pop Rocks">Indie Pop Rocks</option>
-                                                <option value="https://ice1.somafm.com/thetrip-256-mp3|SomaFM: The Trip">The Trip (Progressive)</option>
-                                                <option value="https://ice2.somafm.com/deepspaceone-256-mp3|SomaFM: Deep Space One">Deep Space One (Experimental)</option>
-                                            </optgroup>
-                                            <optgroup label="Public Radio">
-                                                <option value="https://kexp-mp3-128.streamguys1.com/kexp128.mp3|KEXP 90.3 Seattle">KEXP 90.3 (Seattle Indie)</option>
-                                                <option value="https://npr-ice.streamguys1.com/live.mp3|NPR News">NPR News</option>
-                                            </optgroup>
-                                            <optgroup label="Jazz">
-                                                <option value="https://ice3.somafm.com/illstreet-256-mp3|SomaFM: Ill Street Blues">Ill Street Blues (Jazz)</option>
-                                                <option value="https://ice4.somafm.com/seventies-256-mp3|SomaFM: Seventies Lounge">Seventies Lounge</option>
-                                            </optgroup>
-                                            <optgroup label="Classical">
-                                                <option value="https://ice5.somafm.com/classical-256-mp3|SomaFM: SomaFM Classical">SomaFM Classical</option>
-                                            </optgroup>
-                                        </select>
-                                    </div>
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Media URL</span>
-                                            <span>Direct http(s) stream, file, or runtime path</span>
-                                        </label>
-                                        <input type="url" data-hubmusic-field="url" value="${escapeHtml(draft.url)}" placeholder="https://example.com/stream.flac or /tts/example.wav">
-                                    </div>
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Title</span>
-                                            <span>Optional label for the active route</span>
-                                        </label>
-                                        <input type="text" data-hubmusic-field="title" value="${escapeHtml(draft.title)}" placeholder="Living Room Jazz, Phone Relay, News Stream...">
-                                    </div>
-                                    <div class="hubmusic-actions">
-                                        <button class="btn primary" data-hubmusic-play>Start Playback</button>
-                                        <button class="btn ghost" data-hubmusic-stop ${state.hubMusic.active ? '' : 'disabled'}>Stop Playback</button>
-                                    </div>
-                                </div>
-                            </section>
-
-                            <section class="section">
-                                <div class="section-head">
-                                    <h3>Desktop Audio</h3>
-                                    <span class="chip">${desktopAudio.available ? 'Available' : 'Unavailable'}</span>
-                                </div>
-                                <div class="hubmusic-form">
-                                    <div class="hubmusic-actions">
-                                        <button class="btn primary" data-hubmusic-stream-start ${desktopAudio.available ? '' : 'disabled'}>Start Streaming</button>
-                                        <button class="btn ghost" data-hubmusic-stream-stop ${state.hubMusic.active ? '' : 'disabled'}>Stop Streaming</button>
-                                    </div>
-                                    <div class="control-note">${escapeHtml(desktopAudio.available
-                                        ? "Use this for Pandora, Spotify, YouTube, or any audio playing on this PC. Play the service in your browser, then click Start Streaming to relay it to all reachable satellites."
-                                        : (desktopAudio.reason || 'No audio capture source is available. Install sounddevice to enable desktop relay.'))}</div>
-                                </div>
-                            </section>
-
-                            <section class="section">
-                                <h3>Ingress Notes</h3>
-                                <div class="hubmusic-info-list">
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Free Internet Radio</span>
-                                            <span>No account required</span>
-                                        </label>
-                                        <div class="control-note">Use the Station Preset dropdown to pick a free internet radio station. These are direct MP3 streams — no DRM, no login.</div>
-                                    </div>
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Pandora / Spotify / YouTube</span>
-                                            <span>Use Desktop Audio relay</span>
-                                        </label>
-                                        <div class="control-note">These services use DRM and don't expose direct stream URLs. Play them in your browser as normal, then use Desktop Audio → Start Streaming to relay whatever is playing on this PC to your satellites.</div>
-                                    </div>
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Custom Streams</span>
-                                            <span>Direct URL playback</span>
-                                        </label>
-                                        <div class="control-note">Paste any direct HTTP/HTTPS stream URL (MP3, FLAC, AAC, WAV) into the Media URL field and HubVoice will push it directly to the satellite media player.</div>
-                                    </div>
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Phone Through PC</span>
-                                            <span>Use Desktop Relay if your phone audio reaches Windows</span>
-                                        </label>
-                                        <div class="control-note">If your phone is already playing through Windows audio, HubMusic can relay that desktop mix using the capture device above.</div>
-                                    </div>
-                                </div>
-                            </section>
-                        </div>
-
-                        <aside class="side-column">
-                            <section class="section">
-                                <div class="section-head">
-                                    <h3>Status</h3>
-                                    <span class="chip">${activeSatelliteLabel}</span>
-                                </div>
-                                <div class="hubmusic-status-list">
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Runtime</span>
-                                            <span>${escapeHtml(state.hubMusic.runtime_host || 'unknown')}:${escapeHtml(String(state.hubMusic.runtime_port || ''))}</span>
-                                        </label>
-                                        <div class="control-note">This host must be reachable by the satellite for runtime-relative audio URLs.</div>
-                                    </div>
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Current State</span>
-                                            <span>${state.hubMusic.active ? 'Play request active' : 'Idle'}</span>
-                                        </label>
-                                        <div class="control-note">${escapeHtml(state.hubMusic.last_error || 'No active HubMusic errors.')}</div>
-                                    </div>
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Excluded</span>
-                                            <span>${escapeHtml(state.hubMusic.exclude_satellite || 'None')}</span>
-                                        </label>
-                                        <div class="control-note">Only applied when route mode is all reachable satellites.</div>
-                                    </div>
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Last Operation</span>
-                                            <span>${escapeHtml(state.hubMusic.last_operation || 'none')}</span>
-                                        </label>
-                                        <div class="hubmusic-result-list">
-                                            <div>
-                                                <div class="control-note">Sent</div>
-                                                ${renderTargetPills(state.hubMusic.last_sent, 'good')}
-                                            </div>
-                                            <div>
-                                                <div class="control-note">Stopped</div>
-                                                ${renderTargetPills(state.hubMusic.last_stopped, 'warn')}
-                                            </div>
-                                            <div>
-                                                <div class="control-note">Retried</div>
-                                                ${renderTargetPills(state.hubMusic.last_retried, 'warn')}
-                                            </div>
-                                            <div>
-                                                <div class="control-note">Failed</div>
-                                                ${renderTargetPills(state.hubMusic.last_failed, 'bad')}
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </section>
-
-                            <section class="section">
-                                <div class="section-head">
-                                    <h3>Active Route</h3>
-                                </div>
-                                <div class="hubmusic-summary">
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Title</span>
-                                            <span>${escapeHtml(state.hubMusic.title || 'Untitled route')}</span>
-                                        </label>
-                                        <div class="control-note">Requested by the HubMusic tab.</div>
-                                    </div>
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>URL</span>
-                                            <span>${state.hubMusic.source_url ? 'Configured' : 'None'}</span>
-                                        </label>
-                                        <div class="control-note">${escapeHtml(state.hubMusic.source_url || 'No source URL selected.')}</div>
-                                    </div>
-                                    <div class="control-row">
-                                        <label class="control-title">
-                                            <span>Started</span>
-                                            <span>${escapeHtml(formatTimestamp(state.hubMusic.started_at))}</span>
-                                        </label>
-                                        <div class="control-note">Stop playback manually from HubMusic when you want to clear the route state.</div>
-                                    </div>
-                                </div>
-                            </section>
-
-                            <section class="section">
-                                <div class="hubmusic-history-head">
-                                    <h3>Recent Operations</h3>
-                                    <button class="btn ghost small" data-hubmusic-export>Export Debug Snapshot</button>
-                                </div>
-                                ${renderHistoryList(state.hubMusic.history)}
-                            </section>
-
-                        </aside>
-                    </div>
-                </article>
-            `;
-        } // end _legacyHubMusicCard_unused
-
-        function renderSatelliteCard(satellite) {
-            const draft = getDraft(satellite.id);
-            const reachableClass = satellite.reachable ? 'good' : 'bad';
-            const reachableText = satellite.reachable ? 'ESPHome API reachable' : 'ESPHome API unavailable';
-            const streamStatus = satellite.stream_status || null;
-            const streamChip = streamStatus
-                ? `<span class="chip ${streamStatus.mode === 'tone' ? 'good' : ''}">${escapeHtml(formatStreamStatusLabel(streamStatus))}</span>`
-                : '<span class="chip">Idle</span>';
-            return `
-                <article class="panel card">
-                    <header class="card-header">
-                        <div>
-                            <h2 class="card-title">${escapeHtml(satellite.alias || satellite.id)}</h2>
-                            <div class="card-subtitle">ID ${escapeHtml(satellite.id)} · ${escapeHtml(satellite.host)}</div>
-                        </div>
-                        <span class="status ${reachableClass}">${escapeHtml(reachableText)}</span>
-                    </header>
-
-                    <div class="meta-strip">
-                        <a class="btn ghost small" href="${escapeHtml(satellite.web_url)}" target="_blank" rel="noreferrer">Open Satellite UI</a>
-                        ${streamChip}
-                    </div>
-                    <div class="control-deck">
-                        <div class="main-column">
-                            <section class="section">
-                                <h3>Speak</h3>
-                                <div class="row">
-                                    <textarea data-text="${escapeHtml(satellite.id)}" placeholder="Type what this satellite should say...">${escapeHtml(draft.text || '')}</textarea>
-                                    <button class="btn primary" data-send="${escapeHtml(satellite.id)}">Send Text</button>
-                                </div>
-                            </section>
-
-                            <section class="section">
-                                <h3>Modes</h3>
-                                <div class="levels-grid">
-                                    ${renderNumberControl(satellite.id, 'bass_level', draft.bass_level ?? state.controls.bass_level?.default ?? 0)}
-                                    ${renderNumberControl(satellite.id, 'treble_level', draft.treble_level ?? state.controls.treble_level?.default ?? 0)}
-                                </div>
-                            </section>
-                        </div>
-
-                        <aside class="side-column">
-                            <section class="section">
-                                <div class="section-head">
-                                    <h3>Levels</h3>
-                                </div>
-                                <div class="levels-grid">
-                                    ${renderNumberControl(satellite.id, 'speaker_volume', draft.speaker_volume)}
-                                    ${renderNumberControl(satellite.id, 'wake_sound_volume', draft.wake_sound_volume)}
-                                    ${renderNumberControl(satellite.id, 'whisper_volume_pct', draft.whisper_volume_pct)}
-                                    ${renderNumberControl(satellite.id, 'follow_up_listen_window_seconds', draft.follow_up_listen_window_seconds)}
-                                </div>
-                            </section>
-                        </aside>
-                    </div>
-                </article>
-            `;
-        }
-
-        function renderCards() {
-            const cards = document.getElementById('cards');
-            if (!state.satellites.length) {
-                if (!state.activeSatelliteId) {
-                    state.activeSatelliteId = HUB_MUSIC_TAB_ID;
-                }
-                if (state.activeSatelliteId === HUB_MUSIC_TAB_ID) {
-                    cards.innerHTML = `${renderTabs()}${renderHubMusicCard()}`;
-                } else {
-                    cards.innerHTML = `${renderTabs()}<div class="panel card"><p style="margin:0;color:var(--muted);">No satellites configured.</p></div>`;
-                }
-                setGlobalStatus('No satellites configured', 'bad');
-                return;
-            }
-
-            const knownIds = new Set(state.satellites.map((satellite) => satellite.id));
-            if (!state.activeSatelliteId) {
-                state.activeSatelliteId = HUB_MUSIC_TAB_ID;
-            }
-            if (state.activeSatelliteId !== HUB_MUSIC_TAB_ID && !knownIds.has(state.activeSatelliteId)) {
-                state.activeSatelliteId = HUB_MUSIC_TAB_ID;
-            }
-            const active = state.satellites.find((satellite) => satellite.id === state.activeSatelliteId) || state.satellites[0];
-            if (state.activeSatelliteId === HUB_MUSIC_TAB_ID) {
-                cards.innerHTML = `${renderTabs()}${renderHubMusicCard()}`;
-            } else {
-                cards.innerHTML = `${renderTabs()}${renderSatelliteCard(active)}`;
-            }
-        }
-
-        function formatStreamStatusLabel(status) {
-            if (!status || !status.path) return 'Idle';
-            const family = String(status.family || '').toUpperCase();
-            const path = String(status.path || '').replace(/_/g, ' ');
-            const mode = String(status.mode || '').toUpperCase();
-            return `${family} ${path} ${mode}`.trim();
-        }
-
-        function renderNumberControl(id, entity, value) {
-            const meta = state.controls[entity];
-            const disabled = !isControlSettable(id, entity);
-            const visualDisabled = disabled && entity !== 'whisper_volume_pct';
-            const action = getControlAction(id, entity);
-            return `
-                <div class="control-row${visualDisabled ? ' disabled' : ''}">
-                    <div class="control-top">
-                        <label class="control-title">
-                            <span>${escapeHtml(meta.label)}</span>
-                            <span>${meta.min} - ${meta.max}</span>
-                        </label>
-                        ${action ? `<button class="row-action${action.active ? ' active' : ''}" data-row-action="${escapeHtml(id)}:${escapeHtml(entity)}:${escapeHtml(action.kind)}:${escapeHtml(action.entity || '')}:${action.active ? '1' : '0'}"><span>${escapeHtml(action.label)}</span><span class="row-switch"></span></button>` : ''}
-                    </div>
-                    <div class="range-row">
-                        <input type="range" min="${meta.min}" max="${meta.max}" step="1" value="${value}" ${visualDisabled ? 'disabled' : ''} ${visualDisabled ? '' : `data-range="${escapeHtml(id)}:${entity}"`}>
-                        <input type="number" min="${meta.min}" max="${meta.max}" step="1" value="${value}" ${visualDisabled ? 'disabled' : ''} ${visualDisabled ? '' : `data-input="${escapeHtml(id)}:${entity}"`}>
-                    </div>
-                    ${visualDisabled ? `<div class="control-note">${meta.settable === false ? 'Firmware default' : 'Not exposed by firmware'}</div>` : ''}
-                </div>
-            `;
-        }
-
-        async function loadSatellites(options = {}) {
-            const quiet = !!options.quiet;
-            if (!quiet) {
-                setGlobalStatus('Loading satellites...');
-            }
-            try {
-                const data = await api('/satellites');
-                const previousActiveId = state.activeSatelliteId;
-                state.satellites = (data.satellites || []).sort((a, b) => (a.alias || a.id).localeCompare(b.alias || b.id));
-                state.controls = data.controls || {};
-                state.capabilities = {};
-                for (const satellite of state.satellites) {
-                    state.capabilities[satellite.id] = satellite.capabilities || { supports: {}, resolved: {} };
-                }
-                const available = new Set(state.satellites.map((satellite) => satellite.id));
-                state.activeSatelliteId = previousActiveId === HUB_MUSIC_TAB_ID || available.has(previousActiveId)
-                    ? previousActiveId
-                    : (state.activeSatelliteId || HUB_MUSIC_TAB_ID);
-                for (const satellite of state.satellites) {
-                    const draft = getDraft(satellite.id);
-                    const synced = satellite.control_state || {};
-                    for (const [entity, meta] of Object.entries(state.controls)) {
-                        if (
-                            entity === 'speaker_volume'
-                            || entity === 'bass_level'
-                            || entity === 'treble_level'
-                            || entity === 'wake_sound_volume'
-                            || entity === 'whisper_volume_pct'
-                        ) {
-                            // Never let background sync reset user-controlled local settings.
-                            // These should only change from explicit user actions.
-                            if (typeof draft[entity] !== 'number') {
-                                draft[entity] = meta.default;
-                            }
-                            continue;
-                        }
-                        if (typeof synced[entity] === 'number') {
-                            draft[entity] = synced[entity];
-                        } else if (typeof draft[entity] !== 'number') {
-                            draft[entity] = meta.default;
-                        }
-                    }
-                    if (typeof synced.speaker_muted === 'boolean') {
-                        draft.speaker_muted = synced.speaker_muted;
-                    }
-                    if (typeof synced.wake_muted === 'boolean') {
-                        draft.wake_muted = synced.wake_muted;
-                    }
-                    if (typeof synced.whisper_mode === 'boolean') {
-                        draft.whisper_mode = synced.whisper_mode;
-                    }
-                    if (typeof synced.follow_up_listening_switch === 'boolean') {
-                        draft.follow_up_listening_switch = synced.follow_up_listening_switch;
-                    }
-                }
-                getHubMusicDraft();
-                if (!quiet || !isEditingField()) {
-                    renderCards();
-                }
-                const onlineCount = state.satellites.filter((sat) => sat.reachable).length;
-                setGlobalStatus(`${onlineCount}/${state.satellites.length} satellites reachable`, onlineCount ? 'good' : 'bad');
-            } catch (error) {
-                if (!quiet || !isEditingField()) {
-                    renderCards();
-                }
-                setGlobalStatus(error.message || 'Failed to load satellites', 'bad');
-                showToast(error.message || 'Failed to load satellites', 'bad');
-            }
-        }
-
-        async function refreshFromRuntime(quiet = true) {
-            if (backgroundRefreshInFlight) {
-                return;
-            }
-            backgroundRefreshInFlight = true;
-            try {
-                await loadSatellites({ quiet });
-                await loadHubMusic(quiet);
-            } finally {
-                backgroundRefreshInFlight = false;
-            }
-        }
-
-        async function loadHubMusic(quiet = false) {
-            try {
-                const data = await api('/hubmusic/status');
-                state.hubMusic = { ...state.hubMusic, ...(data.status || {}) };
-                const op = String(state.hubMusic.last_operation || '');
-                if (hubMusicLastOperationSeen === null) {
-                    hubMusicLastOperationSeen = op;
-                } else if (op && op !== hubMusicLastOperationSeen) {
-                    if (op === 'voice_pause') {
-                        showToast('HubMusic paused for voice.');
-                    } else if (op === 'voice_resume') {
-                        if (state.hubMusic.active) {
-                            showToast('HubMusic resumed after voice.');
-                        } else {
-                            showToast('HubMusic resume failed after voice.', 'bad');
-                        }
-                    }
-                    hubMusicLastOperationSeen = op;
-                }
-                getHubMusicDraft();
-                if (!quiet || !isEditingField()) {
-                    renderCards();
-                }
-            } catch (error) {
-                state.hubMusic.last_error = error.message || 'Failed to load HubMusic status';
-                if (!quiet || !isEditingField()) {
-                    renderCards();
-                }
-            }
-        }
-
-        async function sendText(id) {
-            const area = document.querySelector(`[data-text="${id}"]`);
-            const text = area.value.trim();
-            if (!text) {
-                showToast('Enter text before sending.', 'bad');
-                return;
-            }
-            try {
-                await api('/answer', { method: 'POST', body: JSON.stringify({ satellite: id, text }) });
-                getDraft(id).text = '';
-                area.value = '';
-                showToast(`Queued speech for ${id}.`);
-            } catch (error) {
-                showToast(error.message, 'bad');
-            }
-        }
-
-        async function setSwitch(id, entity, nextState) {
-            try {
-                await api('/satellite-switch', {
-                    method: 'POST',
-                    body: JSON.stringify({ satellite: id, entity, state: nextState })
-                });
-                getDraft(id)[entity] = nextState;
-                renderCards();
-                showToast(`${id}: ${entity} ${nextState ? 'on' : 'off'}.`);
-            } catch (error) {
-                showToast(error.message, 'bad');
-            }
-        }
-
-        async function setMediaMute(id, nextState) {
-            try {
-                await api('/satellite-media', {
-                    method: 'POST',
-                    body: JSON.stringify({ satellite: id, muted: nextState })
-                });
-                getDraft(id).speaker_muted = nextState;
-                renderCards();
-                showToast(`${id}: ${nextState ? 'muted' : 'unmuted'}.`);
-            } catch (error) {
-                showToast(error.message, 'bad');
-            }
-        }
-
-        async function setWakeMute(id, nextState) {
-            const draft = getDraft(id);
-            const meta = state.controls.wake_sound_volume;
-            const targetValue = nextState
-                ? meta.min
-                : Math.max(meta.min, Math.min(meta.max, Number(draft.wake_previous || meta.default)));
-            try {
-                if (!nextState) {
-                    draft.wake_previous = targetValue;
-                } else if (draft.wake_sound_volume > meta.min) {
-                    draft.wake_previous = draft.wake_sound_volume;
-                }
-                await api('/satellite-number', {
-                    method: 'POST',
-                    body: JSON.stringify({ satellite: id, entity: 'wake_sound_volume', value: targetValue })
-                });
-                draft.wake_sound_volume = targetValue;
-                draft.wake_muted = nextState;
-                renderCards();
-                showToast(`${id}: wake ${nextState ? 'muted' : 'unmuted'}.`);
-            } catch (error) {
-                showToast(error.message, 'bad');
-            }
-        }
-
-        function queueImmediateLevelApply(id, entity) {
-            if (!isControlSettable(id, entity)) {
-                return;
-            }
-            const key = `${id}:${entity}`;
-            const draft = getDraft(id);
-            const value = Number(draft[entity]);
-            levelApplyPending.set(key, value);
-            const priorTimer = levelApplyTimers.get(key);
-            if (priorTimer) {
-                clearTimeout(priorTimer);
-            }
-            const delayMs = entity === 'speaker_volume' ? 350 : 220;
-            const timer = setTimeout(async () => {
-                levelApplyTimers.delete(key);
-                if (levelApplyInFlight.has(key)) {
-                    // Another request is in flight; keep latest pending value and let it flush next.
-                    return;
-                }
-                const pendingValue = levelApplyPending.get(key);
-                if (pendingValue === undefined) {
-                    return;
-                }
-                levelApplyInFlight.add(key);
-                levelApplyPending.delete(key);
-                try {
-                    let result;
-                    if (entity === 'speaker_volume') {
-                        result = await api('/satellite-media-volume', {
-                            method: 'POST',
-                            body: JSON.stringify({ satellite: id, value: pendingValue })
-                        });
-                    } else {
-                        result = await api('/satellite-number', {
-                            method: 'POST',
-                            body: JSON.stringify({ satellite: id, entity, value: pendingValue })
-                        });
-                    }
-                    const label = state.controls[entity]?.label || entity;
-                    if (entity === 'speaker_volume' && result && result.applied === false) {
-                        showToast(`${id}: ${label} update deferred (device busy).`);
-                    } else {
-                        showToast(`${id}: ${label} set to ${pendingValue}.`);
-                    }
-                } catch (error) {
-                    showToast(error.message, 'bad');
-                } finally {
-                    levelApplyInFlight.delete(key);
-                    if (levelApplyPending.has(key)) {
-                        queueImmediateLevelApply(id, entity);
-                    }
-                }
-            }, delayMs);
-            levelApplyTimers.set(key, timer);
-        }
-
-        async function startHubMusicService() {
-            if (state.hubMusicBusy) {
-                return;
-            }
-            state.hubMusicBusy = true;
-            renderCards();
-            const draft = getHubMusicDraft();
-            const RELAY_SERVICES = ['pandora', 'spotify', 'youtube', 'phone'];
-            let playUrl = '';
-            let title = '';
-            if (RELAY_SERVICES.includes(draft.selectedService) || draft.selectedService === 'airplay') {
-                const device = state.hubMusic.desktop_audio?.preferred_device;
-                const deviceParam = device != null ? `?device=${encodeURIComponent(device)}` : '';
-                playUrl = `/hubmusic/live.mp3${deviceParam}`;
-                title = { pandora: 'Pandora', spotify: 'Spotify', youtube: 'YouTube Music', phone: 'Bluetooth', airplay: 'AirPlay' }[draft.selectedService] || draft.selectedService;
-            } else if (draft.selectedService === 'radio') {
-                let stationUrl = draft.radioUrl.trim();
-                let stationName = draft.radioName.trim();
-                const preset = parseRadioOption(draft.radioPreset);
-                if (!stationUrl) {
-                    stationUrl = preset.url;
-                }
-                if (!stationName) {
-                    stationName = preset.label;
-                }
-                const stability = draft.stabilityMode || 'max';
-                playUrl = stationUrl ? `/hubmusic/proxy?url=${encodeURIComponent(stationUrl)}&stability=${encodeURIComponent(stability)}` : '';
-                title = stationName || 'Internet Radio';
-            } else if (draft.selectedService === 'dlna') {
-                try {
-                    const body = {
-                        mode: draft.mode,
-                        satellite: draft.mode === 'single' ? draft.satellite : '',
-                        exclude_satellite: draft.mode === 'all_reachable' ? draft.excludeSatellite : '',
-                    };
-                    const data = await api('/dlna/start', {
-                        method: 'POST',
-                        body: JSON.stringify(body),
-                    });
-                    if (data && data.status) {
-                        state.hubMusic.dlna = { ...(state.hubMusic.dlna || {}), ...data.status };
-                    }
-                    await loadHubMusic();
-                    showToast('DLNA route armed. Start playback from your phone app.');
-                } catch (error) {
-                    state.hubMusic.last_error = error.message;
-                    showToast(error.message, 'bad');
-                } finally {
-                    state.hubMusicBusy = false;
-                    renderCards();
-                }
-                return;
-            }
-            if (!playUrl) {
-                showToast('Select a service and station first.', 'bad');
-                state.hubMusicBusy = false;
-                renderCards();
-                return;
-            }
-
-            if (draft.selectedService === 'airplay' && !state.hubMusic.airplay?.running) {
-                showToast('Start AirPlay receiver first.', 'bad');
-                state.hubMusicBusy = false;
-                renderCards();
-                return;
-            }
-
-            try {
-                const body = { url: playUrl, title, mode: draft.mode };
-                if (draft.mode === 'single') body.satellite = draft.satellite;
-                if (draft.mode === 'all_reachable' && draft.excludeSatellite) body.exclude_satellite = draft.excludeSatellite;
-                if (draft.mode === 'stereo_pair') {
-                    body.left_satellite = draft.stereoLeft;
-                    body.right_satellite = draft.stereoRight;
-                }
-                const data = await api('/hubmusic/play', { method: 'POST', body: JSON.stringify(body) });
-                state.hubMusic = { ...state.hubMusic, ...(data.status || {}) };
-                renderCards();
-                const n = Array.isArray(data.sent) ? data.sent.length : 1;
-                showToast(`${title} started on ${n} satellite${n !== 1 ? 's' : ''}.`);
-            } catch (error) {
-                state.hubMusic.last_error = error.message;
-                renderCards();
-                showToast(error.message, 'bad');
-            } finally {
-                state.hubMusicBusy = false;
-                renderCards();
-            }
-        }
-
-        async function stopHubMusicService() {
-            if (state.hubMusicBusy) {
-                return;
-            }
-            state.hubMusicBusy = true;
-            renderCards();
-            const draft = getHubMusicDraft();
-            try {
-                const body = draft.mode === 'all_reachable'
-                    ? { all: true, mode: 'all_reachable', exclude_satellite: draft.excludeSatellite }
-                    : (draft.mode === 'stereo_pair'
-                        ? { mode: 'stereo_pair', left_satellite: draft.stereoLeft, right_satellite: draft.stereoRight }
-                        : { satellite: draft.satellite || state.hubMusic.satellite, mode: 'single' });
-                const data = await api('/hubmusic/stop', { method: 'POST', body: JSON.stringify(body) });
-                state.hubMusic = { ...state.hubMusic, ...(data.status || {}) };
-                renderCards();
-                showToast('Playback stopped.');
-            } catch (error) {
-                state.hubMusic.last_error = error.message;
-                renderCards();
-                showToast(error.message, 'bad');
-            } finally {
-                state.hubMusicBusy = false;
-                renderCards();
-            }
-        }
-
-        async function startAirPlayReceiver() {
-            if (state.airplayBusy) {
-                return;
-            }
-            state.airplayBusy = true;
-            renderCards();
-            try {
-                const data = await api('/airplay/start', {
-                    method: 'POST',
-                    body: JSON.stringify({ name: 'HubVoiceAirPlay' }),
-                });
-                if (data && data.status) {
-                    state.hubMusic.airplay = { ...(state.hubMusic.airplay || {}), ...data.status };
-                }
-                showToast(data.message || 'AirPlay receiver started.');
-            } catch (error) {
-                showToast(error.message || 'Failed to start AirPlay receiver.', 'bad');
-            } finally {
-                state.airplayBusy = false;
-                renderCards();
-            }
-        }
-
-        async function stopAirPlayReceiver() {
-            if (state.airplayBusy) {
-                return;
-            }
-            state.airplayBusy = true;
-            renderCards();
-            try {
-                const data = await api('/airplay/stop', {
-                    method: 'POST',
-                    body: JSON.stringify({}),
-                });
-                if (data && data.status) {
-                    state.hubMusic.airplay = { ...(state.hubMusic.airplay || {}), ...data.status };
-                }
-                showToast(data.message || 'AirPlay receiver stopped.');
-            } catch (error) {
-                showToast(error.message || 'Failed to stop AirPlay receiver.', 'bad');
-            } finally {
-                state.airplayBusy = false;
-                renderCards();
-            }
-        }
-
-        async function startDlnaRenderer() {
-            if (state.dlnaBusy) {
-                return;
-            }
-            state.dlnaBusy = true;
-            renderCards();
-            const draft = getHubMusicDraft();
-            try {
-                const body = {
-                    mode: draft.mode,
-                    satellite: draft.mode === 'single' ? draft.satellite : '',
-                    exclude_satellite: draft.mode === 'all_reachable' ? draft.excludeSatellite : '',
-                };
-                const data = await api('/dlna/start', {
-                    method: 'POST',
-                    body: JSON.stringify(body),
-                });
-                if (data && data.status) {
-                    state.hubMusic.dlna = { ...(state.hubMusic.dlna || {}), ...data.status };
-                }
-                showToast(data.message || 'DLNA renderer started.');
-            } catch (error) {
-                showToast(error.message || 'Failed to start DLNA renderer.', 'bad');
-            } finally {
-                state.dlnaBusy = false;
-                renderCards();
-            }
-        }
-
-        async function stopDlnaRenderer() {
-            if (state.dlnaBusy) {
-                return;
-            }
-            state.dlnaBusy = true;
-            renderCards();
-            try {
-                const data = await api('/dlna/stop', {
-                    method: 'POST',
-                    body: JSON.stringify({}),
-                });
-                if (data && data.status) {
-                    state.hubMusic.dlna = { ...(state.hubMusic.dlna || {}), ...data.status };
-                }
-                showToast(data.message || 'DLNA renderer stopped.');
-            } catch (error) {
-                showToast(error.message || 'Failed to stop DLNA renderer.', 'bad');
-            } finally {
-                state.dlnaBusy = false;
-                renderCards();
-            }
-        }
-
-        async function exportHubMusicSnapshot() {
-            const payload = {
-                exported_at: new Date().toISOString(),
-                active_tab: state.activeSatelliteId,
-                hubmusic: state.hubMusic,
-                hubmusic_draft: state.hubMusicDraft,
-                reachable_satellites: state.satellites.filter((satellite) => satellite.reachable),
-            };
-            const text = JSON.stringify(payload, null, 2);
-            try {
-                if (navigator?.clipboard?.writeText) {
-                    await navigator.clipboard.writeText(text);
-                    showToast('HubMusic debug snapshot copied to clipboard.');
-                    return;
-                }
-            } catch (error) {
-                // Fallback below for environments that block clipboard API.
-            }
-
-            const helper = document.createElement('textarea');
-            helper.value = text;
-            helper.setAttribute('readonly', 'readonly');
-            helper.style.position = 'fixed';
-            helper.style.left = '-10000px';
-            helper.style.top = '-10000px';
-            document.body.appendChild(helper);
-            helper.select();
-            try {
-                const copied = document.execCommand('copy');
-                if (copied) {
-                    showToast('HubMusic debug snapshot copied to clipboard.');
-                } else {
-                    showToast('Could not copy debug snapshot automatically.', 'bad');
-                }
-            } catch (error) {
-                showToast('Clipboard copy failed for debug snapshot.', 'bad');
-            } finally {
-                document.body.removeChild(helper);
-            }
-        }
-
-        function validateHubMusicSnapshot() {
-            const text = String(state.hubMusicImportText || '').trim();
-            if (!text) {
-                state.hubMusicImportReport = [{ level: 'error', message: 'Paste a snapshot JSON document first.' }];
-                renderCards();
-                showToast('No snapshot JSON provided.', 'bad');
-                return;
-            }
-
-            let parsed;
-            try {
-                parsed = JSON.parse(text);
-            } catch (error) {
-                state.hubMusicImportReport = [{ level: 'error', message: `Invalid JSON: ${error.message}` }];
-                renderCards();
-                showToast('Snapshot JSON is invalid.', 'bad');
-                return;
-            }
-
-            const report = [];
-            const hasHubMusic = parsed && typeof parsed === 'object' && parsed.hubmusic && typeof parsed.hubmusic === 'object';
-            const hasDraft = parsed && typeof parsed === 'object' && parsed.hubmusic_draft && typeof parsed.hubmusic_draft === 'object';
-            if (!hasHubMusic) {
-                report.push({ level: 'error', message: 'Missing hubmusic object.' });
-            }
-            if (!hasDraft) {
-                report.push({ level: 'warn', message: 'Missing hubmusic_draft object.' });
-            }
-
-            if (hasHubMusic) {
-                const mode = String(parsed.hubmusic.mode || 'single');
-                if (!['single', 'all_reachable'].includes(mode)) {
-                    report.push({ level: 'warn', message: `Unexpected mode value: ${mode}` });
-                } else {
-                    report.push({ level: 'good', message: `Mode is ${mode}.` });
-                }
-
-                const sourceUrl = String(parsed.hubmusic.source_url || '');
-                if (!sourceUrl) {
-                    report.push({ level: 'warn', message: 'Snapshot has no source_url.' });
-                } else {
-                    report.push({ level: 'good', message: 'Snapshot includes source_url.' });
-                }
-
-                const snapshotTargets = Array.isArray(parsed.hubmusic.satellites) ? parsed.hubmusic.satellites : [];
-                const currentIds = new Set((state.satellites || []).map((satellite) => String(satellite.id || '').toLowerCase()));
-                if (!snapshotTargets.length) {
-                    report.push({ level: 'warn', message: 'Snapshot has no hubmusic.satellites targets.' });
-                } else {
-                    const missing = snapshotTargets
-                        .map((item) => String(item?.id || '').trim())
-                        .filter((id) => id && !currentIds.has(id.toLowerCase()));
-                    if (missing.length) {
-                        report.push({ level: 'warn', message: `Snapshot targets not in current config: ${missing.join(', ')}` });
-                    } else {
-                        report.push({ level: 'good', message: `All ${snapshotTargets.length} snapshot targets exist in current config.` });
-                    }
-                }
-
-                const excluded = String(parsed.hubmusic.exclude_satellite || '').trim();
-                if (excluded && !currentIds.has(excluded.toLowerCase())) {
-                    report.push({ level: 'warn', message: `Excluded satellite is not in current config: ${excluded}` });
-                }
-            }
-
-            if (!report.length) {
-                report.push({ level: 'good', message: 'Snapshot format looks valid.' });
-            }
-
-            state.hubMusicImportReport = report;
-            renderCards();
-            const hasError = report.some((item) => item.level === 'error');
-            showToast(hasError ? 'Snapshot validation found errors.' : 'Snapshot validation complete.', hasError ? 'bad' : 'good');
-        }
-
-        function loadSampleHubMusicSnapshot() {
-            const reachable = (state.satellites || []).filter((satellite) => satellite.reachable);
-            const first = reachable[0] || state.satellites[0] || { id: 'sat-demo', alias: 'Demo Room', host: '192.168.1.50' };
-            const second = reachable[1] || null;
-            const sample = {
-                exported_at: new Date().toISOString(),
-                active_tab: HUB_MUSIC_TAB_ID,
-                hubmusic: {
-                    active: false,
-                    mode: second ? 'all_reachable' : 'single',
-                    satellite: first.id,
-                    satellite_alias: first.alias || first.id,
-                    satellite_host: first.host,
-                    satellites: second
-                        ? [
-                            { id: first.id, alias: first.alias || '', host: first.host },
-                            { id: second.id, alias: second.alias || '', host: second.host },
-                        ]
-                        : [{ id: first.id, alias: first.alias || '', host: first.host }],
-                    exclude_satellite: second ? second.id : '',
-                    title: 'Sample HubMusic Route',
-                    source_url: '/hubmusic/live.mp3?device=0',
-                    started_at: new Date().toISOString(),
-                    last_action: 'stop',
-                    last_error: '',
-                    last_operation: 'play',
-                    last_sent: [{ id: first.id, alias: first.alias || '', host: first.host, duration_ms: 742, attempt: 1 }],
-                    last_stopped: [{ id: first.id, alias: first.alias || '', host: first.host, duration_ms: 315, attempt: 1 }],
-                    last_failed: [],
-                    last_retried: [],
-                    history: [
-                        {
-                            timestamp: new Date().toISOString(),
-                            operation: 'play',
-                            mode: second ? 'all_reachable' : 'single',
-                            exclude_satellite: second ? second.id : '',
-                            sent_count: second ? 2 : 1,
-                            stopped_count: 0,
-                            failed_count: 0,
-                            retried_count: 0,
-                        },
-                    ],
-                },
-                hubmusic_draft: {
-                    mode: second ? 'all_reachable' : 'single',
-                    satellite: first.id,
-                    excludeSatellite: second ? second.id : '',
-                    url: '/hubmusic/live.mp3?device=0',
-                    title: 'Sample HubMusic Route',
-                    desktopDevice: '0',
-                },
-                reachable_satellites: reachable.map((satellite) => ({
-                    id: satellite.id,
-                    alias: satellite.alias || '',
-                    host: satellite.host,
-                })),
-            };
-
-            state.hubMusicImportText = JSON.stringify(sample, null, 2);
-            state.hubMusicImportReport = [{ level: 'good', message: 'Sample snapshot loaded. Click Validate Snapshot to run checks.' }];
-            renderCards();
-            showToast('Sample HubMusic snapshot loaded.');
-        }
-
-        function clearHubMusicVerifier() {
-            state.hubMusicImportText = '';
-            state.hubMusicImportReport = [];
-            renderCards();
-            showToast('Snapshot verifier cleared.');
-        }
-
-        document.addEventListener('click', (event) => {
-            const sendButton = event.target.closest('[data-send]');
-            if (sendButton) {
-                sendText(sendButton.dataset.send);
-                return;
-            }
-
-            const switchButton = event.target.closest('[data-switch]');
-            if (switchButton) {
-                const [id, entity, rawState] = switchButton.dataset.switch.split(':');
-                setSwitch(id, entity, rawState === 'true');
-                return;
-            }
-
-            const rowAction = event.target.closest('[data-row-action]');
-            if (rowAction) {
-                const [id, entity, kind, linkedEntity, rawActive] = rowAction.dataset.rowAction.split(':');
-                const nextState = rawActive !== '1';
-                if (kind === 'speaker-mute') {
-                    setMediaMute(id, nextState);
-                    return;
-                }
-                if (kind === 'wake-mute') {
-                    setWakeMute(id, nextState);
-                    return;
-                }
-                if (kind === 'switch' && linkedEntity) {
-                    setSwitch(id, linkedEntity, nextState);
-                    return;
-                }
-            }
-
-            if (event.target.closest('[data-hubmusic-service-start]')) {
-                startHubMusicService();
-                return;
-            }
-
-            if (event.target.closest('[data-hubmusic-service-stop]')) {
-                stopHubMusicService();
-                return;
-            }
-
-            if (event.target.closest('[data-hubmusic-stereo-test]')) {
-                runHubMusicStereoTest()
-                return
-            }
-
-            if (event.target.closest('[data-airplay-start]')) {
-                startAirPlayReceiver();
-                return;
-            }
-
-            if (event.target.closest('[data-airplay-stop]')) {
-                stopAirPlayReceiver();
-                return;
-            }
-
-            if (event.target.closest('[data-dlna-start]')) {
-                startDlnaRenderer();
-                return;
-            }
-
-            if (event.target.closest('[data-dlna-stop]')) {
-                stopDlnaRenderer();
-                return;
-            }
-
-            if (event.target.closest('[data-hubmusic-radio-delete]')) {
-                const draft = getHubMusicDraft();
-                const presetValue = draft.radioPreset;
-                if (!canDeleteRadioPreset(presetValue)) {
-                    showToast('Select a preset to delete first.', 'bad');
-                    return;
-                }
-                const selected = parseRadioOption(presetValue);
-                const deleted = isCustomRadioPreset(presetValue)
-                    ? deleteCustomRadioPreset(presetValue)
-                    : hideBuiltInRadioPreset(presetValue);
-                if (!deleted) {
-                    showToast('Preset could not be deleted.', 'bad');
-                    return;
-                }
-                draft.radioPreset = '';
-                draft.radioName = selected.label || draft.radioName;
-                draft.radioUrl = selected.url || draft.radioUrl;
-                renderCards();
-                showToast(`Deleted preset: ${selected.label || 'station'}.`);
-                return;
-            }
-
-            if (event.target.closest('[data-hubmusic-radio-save-btn]')) {
-                const draft = getHubMusicDraft();
-                const stationName = draft.radioName.trim();
-                const stationUrl = draft.radioUrl.trim();
-                if (!stationName || !stationUrl) {
-                    showToast('Enter both station name and URL first.', 'bad');
-                    return;
-                }
-                const existing = getRadioOptions().find((item) => item.url.toLowerCase() === stationUrl.toLowerCase());
-                if (existing) {
-                    draft.radioPreset = encodeRadioOption(existing);
-                    draft.radioName = existing.label;
-                    draft.radioUrl = existing.url;
-                    renderCards();
-                    showToast('Preset already exists.', 'bad');
-                    return;
-                }
-                if (!saveRadioPresetIfRequested(stationName, stationUrl)) {
-                    showToast('Preset could not be saved.', 'bad');
-                    return;
-                }
-                draft.radioPreset = `${stationUrl}|${stationName}`;
-                renderCards();
-                showToast(`Saved preset: ${stationName}.`);
-                return;
-            }
-
-            const serviceBtn = event.target.closest('[data-hubmusic-service]');
-            if (serviceBtn) {
-                const serviceId = serviceBtn.dataset.hubmusicService;
-                const SERVICE_OPEN_URLS = {
-                    pandora: 'https://www.pandora.com/',
-                    spotify: 'https://open.spotify.com/',
-                    youtube: 'https://music.youtube.com/',
-                };
-                state.hubMusicDraft.selectedService = serviceId;
-                if (serviceId === 'dlna') {
-                    state.hubMusicDraft.mode = 'all_reachable';
-                    state.hubMusicDraft.excludeSatellite = '';
-                }
-                renderCards();
-                const openUrl = SERVICE_OPEN_URLS[serviceId];
-                if (openUrl && state.hubMusicDraft.autoLaunch) {
-                    const opened = window.open(openUrl, '_blank', 'noopener,noreferrer');
-                    if (!opened) {
-                        showToast('Popup blocked. Allow popups for this page to launch the service tab.', 'bad');
-                    }
-                }
-                return;
-            }
-
-            const modeBtn = event.target.closest('[data-hubmusic-mode-btn]');
-            if (modeBtn) {
-                state.hubMusicDraft.mode = modeBtn.dataset.hubmusicModeBtn;
-                if (modeBtn.dataset.hubmusicSatSelect) {
-                    state.hubMusicDraft.satellite = modeBtn.dataset.hubmusicSatSelect;
-                }
-                if (state.hubMusicDraft.mode !== 'all_reachable') {
-                    state.hubMusicDraft.excludeSatellite = '';
-                }
-                renderCards();
-                return;
-            }
-
-            if (event.target.closest('[data-hubmusic-export]')) {
-                exportHubMusicSnapshot();
-                return;
-            }
-
-            if (event.target.closest('[data-hubmusic-verify]')) {
-                validateHubMusicSnapshot();
-                return;
-            }
-
-            if (event.target.closest('[data-hubmusic-sample]')) {
-                loadSampleHubMusicSnapshot();
-                return;
-            }
-
-            if (event.target.closest('[data-hubmusic-clear-verify]')) {
-                clearHubMusicVerifier();
-                return;
-            }
-
-            const tabButton = event.target.closest('[data-satellite-tab]');
-            if (tabButton) {
-                state.activeSatelliteId = tabButton.dataset.satelliteTab;
-                renderCards();
-            }
-        });
-
-        // Treat only recent pointer/keyboard activity as intentional control changes.
-        document.addEventListener('pointerdown', () => {
-            markUserGesture();
-        }, true);
-        document.addEventListener('keydown', () => {
-            markUserGesture();
-        }, true);
-
-        document.addEventListener('input', (event) => {
-            const speakArea = event.target.closest('[data-text]');
-            if (speakArea) {
-                const id = speakArea.dataset.text;
-                getDraft(id).text = speakArea.value;
-                return;
-            }
-
-            const range = event.target.closest('[data-range]');
-            if (range) {
-                const [id, entity] = range.dataset.range.split(':');
-                syncRange(id, entity, range.value);
-                return;
-            }
-
-            const input = event.target.closest('[data-input]');
-            if (input) {
-                const [id, entity] = input.dataset.input.split(':');
-                const meta = state.controls[entity];
-                const numeric = Number(input.value || meta.default);
-                const clamped = Math.max(meta.min, Math.min(meta.max, numeric));
-                syncRange(id, entity, clamped);
-                return;
-            }
-
-            const radioNameInput = event.target.closest('[data-hubmusic-radio-name]');
-            if (radioNameInput) {
-                state.hubMusicDraft.radioName = radioNameInput.value;
-                return;
-            }
-
-            const radioUrlInput = event.target.closest('[data-hubmusic-radio-url]');
-            if (radioUrlInput) {
-                state.hubMusicDraft.radioUrl = radioUrlInput.value;
-                return;
-            }
-
-            const stereoVolumeInput = event.target.closest('[data-hubmusic-stereo-volume]');
-            if (stereoVolumeInput) {
-                state.hubMusicDraft.stereoVolume = Number(stereoVolumeInput.value);
-                savePersistedHubMusicStereoSettings({
-                    left: state.hubMusicDraft.stereoLeft,
-                    right: state.hubMusicDraft.stereoRight,
-                    volume: state.hubMusicDraft.stereoVolume,
-                });
-                queueHubMusicStereoVolumeApply(state.hubMusicDraft.stereoVolume, false);
-                renderCards();
-                return;
-            }
-
-            const hubMusicField = event.target.closest('[data-hubmusic-field]');
-            if (hubMusicField) {
-                state.hubMusicDraft[hubMusicField.dataset.hubmusicField] = hubMusicField.value;
-                return;
-            }
-
-            const importField = event.target.closest('[data-hubmusic-import]');
-            if (importField) {
-                state.hubMusicImportText = importField.value;
-            }
-        });
-
-        document.addEventListener('change', (event) => {
-            const range = event.target.closest('[data-range]');
-            if (range) {
-                if (!hasRecentUserGesture()) {
-                    return;
-                }
-                const [id, entity] = range.dataset.range.split(':');
-                queueImmediateLevelApply(id, entity);
-                return;
-            }
-
-            const input = event.target.closest('[data-input]');
-            if (input) {
-                if (!hasRecentUserGesture()) {
-                    return;
-                }
-                const [id, entity] = input.dataset.input.split(':');
-                const meta = state.controls[entity];
-                const numeric = Number(input.value || meta.default);
-                const clamped = Math.max(meta.min, Math.min(meta.max, numeric));
-                syncRange(id, entity, clamped);
-                queueImmediateLevelApply(id, entity);
-                return;
-            }
-
-            const radioPreset = event.target.closest('[data-hubmusic-radio-preset]');
-            if (radioPreset) {
-                state.hubMusicDraft.radioPreset = radioPreset.value;
-                const selected = parseRadioOption(radioPreset.value);
-                state.hubMusicDraft.radioName = selected.label;
-                state.hubMusicDraft.radioUrl = selected.url;
-                renderCards();
-                return;
-            }
-
-            const launchToggle = event.target.closest('[data-hubmusic-launch-toggle]');
-            if (launchToggle) {
-                state.hubMusicDraft.autoLaunch = !!launchToggle.checked;
-                return;
-            }
-
-            const exclude = event.target.closest('[data-hubmusic-exclude]');
-            if (exclude) {
-                state.hubMusicDraft.excludeSatellite = exclude.value;
-                return;
-            }
-
-            const stereoLeft = event.target.closest('[data-hubmusic-stereo-left]');
-            if (stereoLeft) {
-                state.hubMusicDraft.stereoLeft = stereoLeft.value;
-                if (state.hubMusicDraft.stereoRight === state.hubMusicDraft.stereoLeft) {
-                    const alternate = state.satellites.find((satellite) => satellite.id !== state.hubMusicDraft.stereoLeft);
-                    if (alternate) {
-                        state.hubMusicDraft.stereoRight = alternate.id;
-                    }
-                }
-                saveHubMusicStereoDefaults();
-                renderCards();
-                return;
-            }
-
-            const stereoRight = event.target.closest('[data-hubmusic-stereo-right]');
-            if (stereoRight) {
-                state.hubMusicDraft.stereoRight = stereoRight.value;
-                if (state.hubMusicDraft.stereoRight === state.hubMusicDraft.stereoLeft) {
-                    const alternate = state.satellites.find((satellite) => satellite.id !== state.hubMusicDraft.stereoRight);
-                    if (alternate) {
-                        state.hubMusicDraft.stereoLeft = alternate.id;
-                    }
-                }
-                saveHubMusicStereoDefaults();
-                renderCards();
-                return;
-            }
-
-            const modeSelect = event.target.closest('[data-hubmusic-mode]');
-            if (modeSelect) {
-                const nextMode = String(modeSelect.value || 'single');
-                state.hubMusicDraft.mode = ['single', 'all_reachable', 'stereo_pair'].includes(nextMode) ? nextMode : 'single';
-                if (state.hubMusicDraft.mode !== 'all_reachable') {
-                    state.hubMusicDraft.excludeSatellite = '';
-                }
-                renderCards();
-                return;
-            }
-
-            const targetSelect = event.target.closest('[data-hubmusic-target]');
-            if (targetSelect) {
-                state.hubMusicDraft.satellite = targetSelect.value;
-                return;
-            }
-
-            const stability = event.target.closest('[data-hubmusic-stability]');
-            if (stability) {
-                state.hubMusicDraft.stabilityMode = stability.value === 'balanced' ? 'balanced' : 'max';
-            }
-
-            const stereoVolume = event.target.closest('[data-hubmusic-stereo-volume]');
-            if (stereoVolume) {
-                if (!hasRecentUserGesture()) {
-                    return;
-                }
-                const vol = Math.max(0, Math.min(100, Number(stereoVolume.value)));
-                state.hubMusicDraft.stereoVolume = vol;
-                queueHubMusicStereoVolumeApply(vol, true);
-                saveHubMusicStereoDefaults();
-                return;
-            }
-        });
-
-        document.getElementById('refresh-btn').addEventListener('click', async () => {
-            await refreshFromRuntime(false);
-        });
-        refreshFromRuntime(false);
-        window.setInterval(() => {
-            refreshFromRuntime(true);
-        }, 3000);
-        document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible') {
-                refreshFromRuntime(true);
-            }
-        });
-    </script>
-</body>
-</html>
-"""
+    for candidate in CONTROL_PAGE_CANDIDATES:
+        try:
+            if candidate.exists():
+                return candidate.read_text(encoding="utf-8")
+        except Exception as exc:
+            logging.warning("Failed to read control page template %s: %s", candidate, exc)
+    return "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>HubVoice Satellite Control</title></head><body><h1>Control page missing</h1><p>control.html was not found next to the runtime.</p></body></html>"
 
 
 def slugify_satellite(sat_id: str) -> str:
@@ -5996,8 +3002,12 @@ def _stop_music_for_voice(satellite_host: str, update_hubmusic_state: bool) -> N
     """Background helper: stop HubMusic media playback when a voice session starts."""
     snapshot = _HUB_MUSIC_STATE.snapshot() if update_hubmusic_state else {}
     try:
-        stop_media_on_satellite(satellite_host, announcement=False)
-        logging.info("Music stopped on voice start for %s", satellite_host)
+        if HUBMUSIC_SOFT_STOP_ONLY:
+            _stop_hubmusic_ffmpeg()
+            logging.info("Music soft-stopped on voice start for %s", satellite_host)
+        else:
+            stop_media_on_satellite(satellite_host, announcement=False)
+            logging.info("Music stopped on voice start for %s", satellite_host)
     except Exception as exc:
         logging.debug("Music stop on voice start skipped for %s: %s", satellite_host, exc)
     finally:
@@ -6194,7 +3204,7 @@ async def set_satellite_media_volume_async(satellite_host: str, volume_percent: 
                 await asyncio.sleep(0.05)
                 return
             except Exception:
-                # Stale key — fall through to full enumeration.
+                # Stale key â€” fall through to full enumeration.
                 _media_player_key_cache.pop(satellite_host, None)
         entities, _ = await asyncio.wait_for(
             client.list_entities_services(),
@@ -6515,7 +3525,33 @@ async def set_satellite_switch_async(satellite_host: str, entity_object_id: str,
 
 def set_satellite_switch(satellite_host: str, entity_object_id: str, state: bool) -> None:
     """Synchronous wrapper for set_satellite_switch_async."""
-    asyncio.run(set_satellite_switch_async(satellite_host, entity_object_id, state))
+    import threading
+    
+    # Store result/error in a container
+    result_container = {"result": None, "error": None}
+    
+    def run_async():
+        try:
+            # Create a new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(set_satellite_switch_async(satellite_host, entity_object_id, state))
+            finally:
+                loop.close()
+        except Exception as e:
+            result_container["error"] = e
+    
+    # Run in a thread to avoid event loop conflicts
+    thread = threading.Thread(target=run_async, daemon=True)
+    thread.start()
+    thread.join(timeout=30)  # Wait up to 30 seconds
+    
+    if thread.is_alive():
+        raise TimeoutError(f"set_satellite_switch timeout after 30 seconds on {satellite_host}")
+    
+    if result_container["error"]:
+        raise result_container["error"]
 
 
 def build_media_url(filename: str) -> str:
@@ -6580,7 +3616,7 @@ def normalize_media_url(raw_url: str) -> str:
     if path.lower().startswith("/hubmusic/live.flac"):
         parsed = parsed._replace(path="/hubmusic/live.mp3" + path[len("/hubmusic/live.flac"):])
         return urllib.parse.urlunparse(parsed)
-    # Rewrite loopback /dlna/live.mp3 → LAN IP so satellite can reach the runtime.
+    # Rewrite loopback /dlna/live.mp3 â†’ LAN IP so satellite can reach the runtime.
     if path.lower() == "/dlna/live.mp3":
         runtime_host = get_runtime_host()
         port = parsed.port or get_runtime_port()
@@ -7497,6 +4533,36 @@ def stop_hubmusic_route(payload: dict, *, default_snapshot: dict | None = None) 
     failed: list[dict] = []
     retried: list[dict] = []
 
+    if HUBMUSIC_SOFT_STOP_ONLY:
+        for target in targets:
+            sat_id = str(target.get("id", ""))
+            sat_alias = str(target.get("alias", ""))
+            sat_host = str(target.get("host", ""))
+            stopped.append(
+                {
+                    "id": sat_id,
+                    "alias": sat_alias,
+                    "host": sat_host,
+                    "duration_ms": 0,
+                    "attempt": 1,
+                    "soft_stop": True,
+                }
+            )
+
+        _HUB_MUSIC_STATE.stop(stopped)
+        _HUB_MUSIC_STATE.set_results("stop", stopped=stopped, failed=failed, retried=retried, exclude_satellite=exclude_id, mode=mode)
+        _APP_STATE.update(last_action=f"hubmusic_stop_soft:{len(stopped)}", last_error="")
+        return {
+            "ok": True,
+            "mode": mode,
+            "exclude_satellite": exclude_id,
+            "satellite": stopped[0]["id"] if stopped else None,
+            "stopped": stopped,
+            "failed": failed,
+            "retried": retried,
+            "status": hubmusic_status_snapshot(),
+        }
+
     for target in targets:
         sat_id = str(target.get("id", ""))
         sat_alias = str(target.get("alias", ""))
@@ -8064,18 +5130,29 @@ class VoiceAssistantBridge:
             return self._client is not None and self._connected
 
     async def _run(self) -> None:
+        _reconnect_delay = 0.0
         while not self._stop_event.is_set():
             satellite = select_satellite(self._satellite_id)
             if not satellite:
                 self._set_state(status="waiting", connected=False, error="No satellites configured", event="idle")
                 await asyncio.sleep(3)
+                _reconnect_delay = 0.0
                 continue
 
+            # Per-attempt event so _on_disconnect signals the inner wait immediately.
+            disconnect_event = asyncio.Event()
+
+            async def _on_stop(expected_disconnect: bool, _evt: asyncio.Event = disconnect_event) -> None:
+                _evt.set()
+                await self._on_disconnect(expected_disconnect)
+
+            _sat_label = f"{satellite.get('alias') or satellite['id']} ({satellite['host']})"
             client = APIClient(satellite["host"], 6054, None, client_info="HubVoiceSatRuntime")
             try:
                 self._set_state(status="connecting", connected=False, error="", event="connecting")
+                logging.info("Voice bridge connecting to %s port 6054...", _sat_label)
                 await asyncio.wait_for(
-                    client.connect(login=False, on_stop=self._on_disconnect),
+                    client.connect(login=False, on_stop=_on_stop),
                     timeout=VOICE_BRIDGE_CONNECT_TIMEOUT,
                 )
                 with self._lock:
@@ -8087,16 +5164,18 @@ class VoiceAssistantBridge:
                 )
                 self._set_state(status="connected", connected=True, error="", event="subscribed")
                 _SCHEDULE_MANAGER.sync_bridge(self)
-                logging.info("Voice assistant client connected to %s:6054", satellite["host"])
+                logging.info("Voice bridge CONNECTED to %s port 6054", _sat_label)
+                _reconnect_delay = 0.0  # reset backoff after a successful connection
 
-                while not self._stop_event.is_set():
-                    await asyncio.sleep(1)
-                    with self._lock:
-                        if self._client is None:
-                            break
+                # Wait until the disconnect event fires or we are stopped.
+                while not self._stop_event.is_set() and not disconnect_event.is_set():
+                    try:
+                        await asyncio.wait_for(disconnect_event.wait(), timeout=0.5)
+                    except asyncio.TimeoutError:
+                        pass
             except Exception as exc:
                 self._set_state(status="error", connected=False, error=str(exc), event="connect_failed")
-                logging.exception("Voice assistant bridge error: %s", exc)
+                logging.error("Voice bridge connect FAILED for %s: %s", self._satellite_id, exc)
             finally:
                 try:
                     if self._unsubscribe is not None:
@@ -8117,7 +5196,16 @@ class VoiceAssistantBridge:
                     self._session = None
                 if not self._stop_event.is_set():
                     self._set_state(status="reconnecting", connected=False, event="disconnected")
-                    await asyncio.sleep(2)
+                    if _reconnect_delay > 0:
+                        logging.info(
+                            "Voice bridge %s will reconnect in %.1fs (backoff)...",
+                            self._satellite_id, _reconnect_delay,
+                        )
+                        await asyncio.sleep(_reconnect_delay)
+                    else:
+                        logging.info("Voice bridge %s reconnecting immediately...", self._satellite_id)
+                    # Exponential backoff: 0 → 1 → 2 → 4 → 8s cap
+                    _reconnect_delay = min(_reconnect_delay * 2 + 1.0, 8.0)
 
     async def _on_disconnect(self, expected_disconnect: bool) -> None:
         self._set_state(
@@ -8128,6 +5216,7 @@ class VoiceAssistantBridge:
         with self._lock:
             self._client = None
             self._session = None
+        logging.info("Voice assistant bridge disconnected (expected=%s) for %s", expected_disconnect, self._satellite_id)
 
     def _send_event(self, event_type: VoiceAssistantEventType, data: dict[str, str] | None = None) -> None:
         with self._lock:
@@ -8254,6 +5343,11 @@ class VoiceAssistantBridge:
         with self._lock:
             session = self._session
         if session is None:
+            logging.debug(
+                "Audio data arrived on bridge %s with no active session (%d bytes dropped) — "
+                "satellite may have restarted mid-session",
+                self._satellite_id, len(data),
+            )
             return
         if not session.saw_audio:
             session.saw_audio = True
@@ -8279,6 +5373,10 @@ class VoiceAssistantBridge:
             self._send_event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END, None)
 
         if aborted and not session.raw_audio:
+            logging.info(
+                "Voice session aborted with no audio on satellite=%s — likely a false wake-word trigger",
+                session.satellite_id,
+            )
             self._send_event(
                 VoiceAssistantEventType.VOICE_ASSISTANT_ERROR,
                 {"code": "aborted", "message": "Voice session stopped"},
@@ -8355,11 +5453,14 @@ class VoiceAssistantBridge:
         write_input_wav(bytes(session.raw_audio), input_wav)
         logging.info("Saved voice input to %s (%s bytes)", input_wav.name, len(session.raw_audio))
 
+        _stt_t0 = time.monotonic()
         transcript_result = transcribe_with_retry(input_wav, session.satellite_id)
+        _stt_elapsed = time.monotonic() - _stt_t0
         transcript = " ".join(str(transcript_result.get("text", "")).split()).strip()
         if not transcript:
+            logging.warning("STT returned empty transcript in %.2fs for %s", _stt_elapsed, session.satellite_id)
             raise RuntimeError("No speech recognized")
-        logging.info("Recognized transcript: %r", transcript)
+        logging.info("STT recognized in %.2fs: %r (satellite=%s)", _stt_elapsed, transcript, session.satellite_id)
 
         pending = self._consume_pending_broadcast(session.satellite_id)
         if pending.get("active"):
@@ -8852,7 +5953,7 @@ def dlna_status_snapshot() -> dict:
 
 
 def _start_dlna_ffmpeg_proxy(source_url: str, bass_db: float = 0.0, treble_db: float = 0.0) -> None:
-    """Launch ffmpeg transcoding source_url → MP3 and broadcast chunks to registered listeners."""
+    """Launch ffmpeg transcoding source_url â†’ MP3 and broadcast chunks to registered listeners."""
     global _DLNA_PROXY_PROC, _DLNA_PROXY_SOURCE_URL, _DLNA_PROXY_LISTENERS, _DLNA_PROXY_BROADCAST_THREAD
     global _DLNA_PROXY_BASS_DB, _DLNA_PROXY_TREBLE_DB
 
@@ -8934,7 +6035,7 @@ def _start_dlna_ffmpeg_proxy(source_url: str, bass_db: float = 0.0, treble_db: f
         _DLNA_PROXY_BROADCAST_THREAD = t
     t.start()
     logging.info(
-        "DLNA proxy started: transcoding %s → MP3 @ %s (bass=%.2fdB treble=%.2fdB)",
+        "DLNA proxy started: transcoding %s â†’ MP3 @ %s (bass=%.2fdB treble=%.2fdB)",
         source_url,
         DLNA_PROXY_BITRATE,
         bass_db,
@@ -8988,7 +6089,7 @@ def _play_dlna_media() -> dict:
             tone_bass_db, tone_treble_db = _get_user_tone_settings(sat["host"])
 
     # Keep-alive: if the proxy is already running for this exact URI and HubMusic is active,
-    # there is nothing to restart — just mark state and return.
+    # there is nothing to restart â€” just mark state and return.
     with _DLNA_PROXY_LOCK:
         proxy_source = _DLNA_PROXY_SOURCE_URL
         proxy_alive = _DLNA_PROXY_PROC is not None and _DLNA_PROXY_PROC.poll() is None
@@ -9021,7 +6122,7 @@ def _play_dlna_media() -> dict:
     if ffmpeg_available:
         _start_dlna_ffmpeg_proxy(uri, tone_bass_db, tone_treble_db)
         effective_url = build_runtime_url("/dlna/live.mp3")
-        logging.info("DLNA play: routing through ffmpeg proxy → %s", effective_url)
+        logging.info("DLNA play: routing through ffmpeg proxy â†’ %s", effective_url)
     else:
         logging.warning("DLNA play: ffmpeg not found, passing source URL directly to satellite (may cause OOM/crash)")
         effective_url = uri
@@ -10757,6 +7858,9 @@ class RuntimeHandler(BaseHTTPRequestHandler):
             body = build_satellite_control_page().encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -10959,7 +8063,26 @@ def main() -> None:
     # Start voice assistant bridges (one per satellite)
     for _bridge in _VOICE_BRIDGES.values():
         _bridge.start()
-    
+
+    # Watch for satellites added after startup and start their bridges automatically.
+    def satellite_watcher() -> None:
+        while not _SHUTDOWN_EVENT.is_set():
+            _SHUTDOWN_EVENT.wait(10)
+            if _SHUTDOWN_EVENT.is_set():
+                break
+            try:
+                for sat in load_satellites():
+                    sid = sat["id"]
+                    if sid not in _VOICE_BRIDGES:
+                        logging.info("New satellite detected: %s — starting voice bridge", sid)
+                        bridge = VoiceAssistantBridge(sid)
+                        _VOICE_BRIDGES[sid] = bridge
+                        bridge.start()
+            except Exception as exc:
+                logging.warning("Satellite watcher error: %s", exc)
+
+    threading.Thread(target=satellite_watcher, daemon=True).start()
+
     # Start cleanup scheduler
     def cleanup_scheduler():
         while not _SHUTDOWN_EVENT.is_set():
@@ -10993,7 +8116,7 @@ def main() -> None:
                 continue
             if proc.poll() is None:
                 continue  # still running, all good
-            # ffmpeg has exited — check if we should be playing
+            # ffmpeg has exited â€” check if we should be playing
             snap = _HUB_MUSIC_STATE.snapshot()
             if snap.get("last_action") != "play":
                 continue  # user stopped music intentionally

@@ -62,24 +62,54 @@ function Get-SecretValue {
   return $match.Matches[0].Groups[1].Value.Trim()
 }
 
-function Assert-ReleaseSecretsAreSafe {
+function Prepare-ReleaseSecrets {
   param(
     [string]$Path
   )
+
+  $state = @{
+    path = $Path
+    hadFile = (Test-Path $Path)
+    original = $null
+    sanitized = $false
+  }
+
+  if ($state.hadFile) {
+    $state.original = Get-Content -Path $Path -Raw -Encoding UTF8
+  }
 
   $ssid = Get-SecretValue -Path $Path -Key "wifi_ssid"
   $password = Get-SecretValue -Path $Path -Key "wifi_password"
 
   if ([string]::IsNullOrWhiteSpace($ssid) -and [string]::IsNullOrWhiteSpace($password)) {
+    return $state
+  }
+
+  $sanitized = @(
+    'wifi_ssid: ""'
+    'wifi_password: ""'
+  )
+  Set-Content -Path $Path -Value $sanitized -Encoding UTF8
+  $state.sanitized = $true
+  Write-Host "Temporarily sanitized secrets.yaml for release build safety."
+  return $state
+}
+
+function Restore-ReleaseSecrets {
+  param(
+    [hashtable]$State
+  )
+
+  if (-not $State -or -not $State.sanitized) {
     return
   }
 
-  throw @"
-Refusing to build release firmware because secrets.yaml contains Wi-Fi credentials.
-This can embed personal SSID/password into OTA and factory .bin files.
-
-Set both wifi_ssid and wifi_password to empty strings before running build-ota-release.ps1.
-"@
+  if ($State.hadFile) {
+    Set-Content -Path $State.path -Value ([string]$State.original) -Encoding UTF8
+  } else {
+    Remove-Item -Path $State.path -ErrorAction SilentlyContinue
+  }
+  Write-Host "Restored local secrets.yaml after release build."
 }
 
 function Invoke-ESPHome {
@@ -95,7 +125,9 @@ function Invoke-ESPHome {
   & $runtimePython -m esphome @Arguments
 }
 
-Assert-ReleaseSecretsAreSafe -Path $secretsPath
+$releaseSecretsState = Prepare-ReleaseSecrets -Path $secretsPath
+
+try {
 
 $yamlPath = Join-Path $repoRoot "hubvoice-sat.yaml"
 $version = Get-YamlValue -Path $yamlPath -Key "firmware_version"
@@ -415,3 +447,6 @@ Write-Host "Created combined release:"
 Write-Host "  $releaseDir"
 Write-Host "Zip package:"
 Write-Host "  $releaseZip"
+} finally {
+  Restore-ReleaseSecrets -State $releaseSecretsState
+}

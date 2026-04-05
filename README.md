@@ -34,7 +34,6 @@ Common variants in this repo:
 - hubvoice-sat.yaml: HA Voice PE default variant
 - hubvoice-sat-fph.yaml: FutureProofHomes Satellite-1 variant
 - hubvoice-sat-fph-ld2410.yaml: Satellite-1 + LD2410 presence variant
-- hubvoice-sat-echos3r.yaml: EchoS3R-targeted variant
 
 The OTA release script can package multiple variants into one release folder.
 

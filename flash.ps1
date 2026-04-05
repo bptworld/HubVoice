@@ -17,7 +17,6 @@ $SatellitesCSV = Join-Path $Root "satellites.csv"
 
 # Select YAML based on hardware model
 $YamlMap = @{
-    "echos3r" = "hubvoice-sat-echos3r.yaml"
     "fph"     = "hubvoice-sat-fph.yaml"
     "sat1"    = "hubvoice-sat-fph.yaml"
     "sat-1"   = "hubvoice-sat-fph.yaml"
@@ -26,7 +25,6 @@ $YamlMap = @{
 if (-not $Model) {
     Write-Host "Hardware model (leave blank for default HA Voice PE):"
     Write-Host "  [blank] = HA Voice PE (hubvoice-sat.yaml)"
-    Write-Host "  echos3r = M5Stack EchoS3R (hubvoice-sat-echos3r.yaml)"
     Write-Host "  fph     = FPH Satellite-1 (hubvoice-sat-fph.yaml)"
     $Model = Read-Host "Model"
 }

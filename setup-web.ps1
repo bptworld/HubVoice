@@ -852,10 +852,8 @@ function Compare-Version([string]$left, [string]$right) {
 
 function Get-SatelliteStatus {
   $items = @()
-  # Default firmware target from main YAML; echos3r satellites get their own target version.
+  # Default firmware target from main YAML.
   $defaultFirmware = [string](Get-YamlValue -Path $yamlPath -Key "firmware_version")
-  $echos3rYamlPath = Join-Path $root "hubvoice-sat-echos3r.yaml"
-  $echos3rFirmware = if (Test-Path $echos3rYamlPath) { [string](Get-YamlValue -Path $echos3rYamlPath -Key "firmware_version") } else { $defaultFirmware }
   $csvText = Get-SatellitesText
   foreach ($line in ($csvText -split "`r?`n")) {
     $row = $line.Trim()
@@ -875,7 +873,7 @@ function Get-SatelliteStatus {
     $webPort = if ($web8080) { 8080 } elseif ($web80) { 80 } else { $null }
     $pingOk = $webOk
     $satFirmware = if ($webOk -and $webPort) { Get-SatelliteFirmwareVersion -ip $ip -port $webPort } else { $null }
-    $targetFirmware = if ($name -like "*echos3r*") { $echos3rFirmware } else { $defaultFirmware }
+    $targetFirmware = $defaultFirmware
     $comparison = Compare-Version $satFirmware $targetFirmware
     $updateStatus = if (-not $satFirmware) {
       "unknown"

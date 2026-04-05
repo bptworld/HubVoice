@@ -1,0 +1,131 @@
+# HubVoiceSat FPH — LD2410 radar presence variant
+# ============================================================================
+# This is a thin wrapper around hubvoice-sat-fph.yaml that adds support for
+# the HLK-LD2410 mmWave presence sensor.
+#
+# Hardware wiring (Satellite1 expansion header):
+#   LD2410 RX  →  GPIO43 (ESP UART TX)
+#   LD2410 TX  →  GPIO44 (ESP UART RX)
+#   LD2410 VCC →  3.3 V
+#   LD2410 GND →  GND
+#
+# Use hubvoice-sat-fph.yaml for devices without a radar sensor.
+# ============================================================================
+
+substitutions:
+  device_name: "hubvoice-sat-fph-ld2410"
+  friendly_name: "HubVoiceSat FPH LD2410"
+  firmware_version: "2026.04.05.1"
+
+packages:
+  base: !include hubvoice-sat-fph.yaml
+
+esphome:
+  project:
+    name: bptwo.hubvoice_sat_fph_ld2410
+    version: ${firmware_version}
+
+# ============================================================================
+# LD2410 UART BUS
+# ============================================================================
+
+uart:
+  tx_pin: GPIO43
+  rx_pin: GPIO44
+  baud_rate: 256000
+  parity: NONE
+  stop_bits: 1
+
+# ============================================================================
+# LD2410 COMPONENT
+# ============================================================================
+
+ld2410:
+
+# ============================================================================
+# BINARY SENSORS
+# ============================================================================
+
+binary_sensor:
+  - platform: ld2410
+    has_target:
+      name: Presence
+    has_moving_target:
+      name: Moving Target
+    has_still_target:
+      name: Still Target
+
+# ============================================================================
+# SENSORS
+# ============================================================================
+
+sensor:
+  - platform: ld2410
+    moving_distance:
+      name: LD2410 Moving Distance
+    still_distance:
+      name: LD2410 Still Distance
+    moving_energy:
+      name: LD2410 Moving Energy
+      disabled_by_default: true
+    still_energy:
+      name: LD2410 Still Energy
+      disabled_by_default: true
+    detection_distance:
+      name: LD2410 Detection Distance
+      disabled_by_default: true
+    light:
+      name: LD2410 Illuminance
+      disabled_by_default: true
+
+# ============================================================================
+# BUTTONS
+# ============================================================================
+
+button:
+  - platform: ld2410
+    factory_reset:
+      name: LD2410 Factory Reset
+    restart:
+      name: LD2410 Restart
+    query_params:
+      name: LD2410 Update Sensors
+
+# ============================================================================
+# NUMBER ENTITIES (gate thresholds / timeout)
+# ============================================================================
+
+number:
+  - platform: ld2410
+    timeout:
+      name: LD2410 Timeout
+    max_move_distance_gate:
+      name: LD2410 Max Moving Distance Gate
+    max_still_distance_gate:
+      name: LD2410 Max Still Distance Gate
+    light_threshold:
+      name: LD2410 Light Threshold
+      disabled_by_default: true
+
+# ============================================================================
+# SELECT ENTITIES
+# ============================================================================
+
+select:
+  - platform: ld2410
+    distance_resolution:
+      name: LD2410 Distance Resolution
+    light_function:
+      name: LD2410 Light Function
+      disabled_by_default: true
+
+# ============================================================================
+# SWITCH ENTITIES
+# ============================================================================
+
+switch:
+  - platform: ld2410
+    engineering_mode:
+      name: LD2410 Engineering Mode
+    bluetooth:
+      name: LD2410 Bluetooth

@@ -1,79 +1,183 @@
-# HubVoiceSat
+# HubVoice and HubVoiceSat
 
-This is the clean restart workspace.
+Local-first voice control for Hubitat with ESPHome-based satellites, Windows runtime tools, and packaged release workflows.
 
-Files:
-- `home-assistant-voice-official.yaml`: untouched official HA Voice PE YAML from `esphome/home-assistant-voice-pe`
-- `hubvoice-sat.yaml`: working copy we will adapt from that official baseline
-- `secrets.yaml`: local-only development file; keep `wifi_ssid` and `wifi_password` empty before creating distributable release bins
-- `build-hubvoice-sat.ps1`: repeatable local config/compile entrypoint for this workspace
-- `build-setup-launcher.ps1`: publishes the Windows setup launcher exe and refreshes the repo-root exe
-- `flash.bat`: simple Windows wrapper for config / compile / flash commands
-- `HubVoiceSatSetup.exe`: single Windows launcher exe that self-stages the setup payload and opens the local setup page
-- `.envs\`: local virtual environments (`main`, `runtime`, `airplay`) used by build/runtime scripts
-- `setup-web.ps1`: setup page/service payload embedded into the launcher
-- `build\HubVoiceSatSetup\HubVoiceSatSetup.exe`: published Windows launcher exe
-- `patch.exe` / `patch.cmd` / `patch-wrapper.ps1`: local Windows patch shim so `micro-opus` can build without Git installed
+This project combines:
+- HubVoice Hubitat app logic
+- HubVoiceSat firmware variants for supported satellite hardware
+- HubVoice runtime services and control UI
+- Build and release scripts for USB-first install and OTA updates
 
-Intent:
-- start from the official HA Voice PE wake/button lifecycle
-- verify stock wake word and stock button behavior first
-- only then re-add Hubitat, custom UI, and helper/server pieces one layer at a time
+## What This Project Does
 
-Rule for this workspace:
-- keep `home-assistant-voice-official.yaml` unchanged
-- make all edits in `hubvoice-sat.yaml`
+HubVoice provides natural voice control and status for your home, while HubVoiceSat satellites handle wake word, audio playback, and local device interaction.
 
-Current state:
-- `hubvoice-sat.yaml` validates cleanly
-- full `esphome compile hubvoice-sat.yaml` succeeds in this workspace
-- stock/new satellites should be flashed once by USB first
-- after HubVoiceSat firmware is on the device, future updates can be done by OTA from the satellite web page
-- the firmware is now built as one generic image and uses `name_add_mac_suffix: true` so each unit gets a unique network identity
-- end users can set a per-device local label from the device web page using `Satellite Name`; `Effective Satellite Name` shows the current result
+Key capabilities:
+- Local voice assistant flow with Hubitat integration
+- Device control, status queries, and group commands
+- Runtime scheduling for timers and alarms
+- Satellite control deck for media, volume, and playback actions
+- Optional AI fallback for non-control questions (Gemini or ChatGPT)
+- Repeatable release packaging for factory and OTA firmware
 
-Recommended end-user update flow:
-- first install on a stock/unknown satellite: USB
-- later updates on a satellite already running HubVoiceSat: OTA package
-- use `.\build-ota-release.ps1` to generate the OTA handoff zip for end users
-- `build-ota-release.ps1` will fail if `secrets.yaml` has non-empty Wi-Fi values to prevent embedding personal credentials in shipped firmware
-- `build-ota-release.ps1` also scans the compiled `.bin` files and fails if local Wi-Fi, satellite, Hubitat, callback, or setup values from this workspace are found inside them
+## Important Notes
 
-Suggested first-time USB path for end users:
-- plug the satellite into USB
-- open `https://web.esphome.io/`
-- connect to the device
-- choose the generated `*-factory.bin`
-- after that first install, use the `*-ota.bin` from the satellite web page for later updates
+- First install on a device should be done with a factory firmware image over USB.
+- Updates after first install should use OTA firmware from the satellite web UI.
+- Release packaging checks for accidental secret leakage in binaries.
+- Keep local Wi-Fi credentials out of distributable release artifacts.
 
-Useful commands:
-- `.\build-hubvoice-sat.ps1 -Action config`
-- `.\build-hubvoice-sat.ps1 -Action compile`
-- `.\build-setup-launcher.ps1`
-- `.\build-ota-release.ps1`
-- `.\verify-firmware-bins.ps1 -BinPaths .\hubvoice-sat-2026.03.31.6-factory.bin,.\hubvoice-sat-2026.03.31.6-ota.bin`
-- `.\HubVoiceSatSetup.exe`
-- `flash.bat config`
-- `flash.bat compile`
-- `flash.bat usb`
-- `flash.bat ota`
+## Firmware Variants
 
-Hubitat satellite TTS proxy:
-- `HubVoiceSatelliteTTSDriver.groovy` is a custom Hubitat virtual driver that exposes a satellite as a `SpeechSynthesis` and `Notification` device.
-- Create one virtual device per satellite in Hubitat using that driver.
-- Set `runtimeBaseUrl` to the HubVoice runtime host, for example `http://192.168.1.50:8080`.
-- Set `satelliteId` to the exact satellite ID from `satellites.csv`.
-- Use the driver's `testConnection` command to verify the runtime is reachable.
-- Use the driver's `discoverSatellites` command to pull the configured satellite IDs from the runtime.
-- Use the driver's `testMessage` command or any Hubitat app `speak()` / notification action to send speech to that satellite.
-- The runtime now exposes `/satellites` and returns the configured IDs/hosts loaded from `satellites.csv`.
+Common variants in this repo:
+- hubvoice-sat.yaml: HA Voice PE default variant
+- hubvoice-sat-fph.yaml: FutureProofHomes Satellite-1 variant
+- hubvoice-sat-fph-ld2410.yaml: Satellite-1 + LD2410 presence variant
+- hubvoice-sat-echos3r.yaml: EchoS3R-targeted variant
 
-Local timers and alarms:
-- The runtime now handles timers and alarms directly before falling back to Hubitat.
-- Timer phrases supported: `set a timer for 5 minutes`, `start a timer for one hour`, `cancel timer`, `cancel all timers`, `how much time is left on the timer`.
-- Alarm phrases supported: `set an alarm for 7:30 am`, `set an alarm for 6 tomorrow morning`, `wake me up at 8 pm`, `cancel alarm`, `cancel all alarms`, `when is my next alarm`.
-- Timers emit native ESPHome timer events so the existing LED progress and timer-finished ringing behavior on the satellite still works.
-- Alarms are scheduled locally in the runtime and use the same satellite ringing path when they fire.
-- Fallback ringing now repeats until dismissed, with an automatic stop after 1 minute.
-- Dismiss phrases: `dismiss`, `silence`, `stop ringing`, `dismiss alarm`, `dismiss timer`, `stop alarm`, `stop timer`.
-- Scheduler state is visible from the runtime root page, `/health`, and `/schedules`.
+The OTA release script can package multiple variants into one release folder.
+
+## Quick Start (Windows)
+
+1. Clone this repository and open PowerShell in the repo root.
+2. Configure and compile firmware:
+
+```powershell
+.\build-hubvoice-sat.ps1 -Action config
+.\build-hubvoice-sat.ps1 -Action compile
+```
+
+3. For a first-time satellite flash, use a factory image via USB:
+- Open https://web.esphome.io/
+- Connect device
+- Install matching factory bin
+
+4. For ongoing updates, generate and use OTA release assets:
+
+```powershell
+.\build-ota-release.ps1
+```
+
+5. Launch the Windows setup runtime UI if needed:
+
+```powershell
+.\HubVoiceSatSetup.exe
+```
+
+## Build and Release Commands
+
+Core build commands:
+
+```powershell
+.\build-hubvoice-sat.ps1 -Action config
+.\build-hubvoice-sat.ps1 -Action compile
+.\build-runtime-exe.ps1
+.\build-setup-launcher.ps1
+.\build-ota-release.ps1
+```
+
+Helpful wrappers:
+
+```powershell
+flash.bat config
+flash.bat compile
+flash.bat usb
+flash.bat ota
+```
+
+Binary verification example:
+
+```powershell
+.\verify-firmware-bins.ps1 -BinPaths .\hubvoice-sat-2026.04.05.1-factory.bin,.\hubvoice-sat-2026.04.05.1-ota.bin
+```
+
+## Hubitat Integration
+
+Main app files:
+- HubVoice.groovy
+- HubVoice_Controller.groovy
+- HubVoice_Satellite_TTS.groovy
+
+Satellite TTS proxy usage:
+- Create a virtual device per satellite in Hubitat
+- Point runtime base URL to your HubVoice runtime host
+- Set satellite ID to match satellites.csv
+- Use speak and notification commands to target specific satellites
+
+## AI Fallback
+
+When HubVoice cannot answer a non-control question, optional AI fallback can be used.
+
+Supported providers:
+- Gemini
+- ChatGPT
+
+Current behavior includes:
+- Provider selection in app settings
+- Provider-specific API key and model fields
+- Basic usage and cost estimation tracking in diagnostics
+- Reset controls for tracked cost history
+
+Note: pricing and cost summaries are estimates based on configured assumptions and recorded token usage.
+
+## Local Runtime Features
+
+Runtime highlights include:
+- Satellite control API endpoints
+- Media command handling and pooling
+- Timer and alarm scheduling
+- Health and diagnostics endpoints
+- Control latency telemetry endpoints
+
+Examples of supported voice intents include:
+- Device on/off and status checks
+- Group actions like all lights and lock flows
+- Timer and alarm create, query, cancel, dismiss
+
+## Repository Layout
+
+Primary areas:
+- Firmware YAML: hubvoice-sat*.yaml
+- Hubitat app logic: *.groovy
+- Runtime service: hubvoice-runtime.py
+- Setup and release scripts: *.ps1, *.bat
+- Release outputs: releases/
+- Runtime and setup assets: assets/, build/, setup-launcher/
+
+## Troubleshooting
+
+If setup or flashing fails:
+- Confirm correct firmware variant for your hardware
+- Verify first install used factory image, not OTA image
+- Re-check USB cable and browser permissions in ESPHome Web Tools
+
+If runtime control is slow or unstable:
+- Confirm satellite host/IP entries in satellites.csv
+- Verify runtime is reachable from the control UI and Hubitat
+- Check health endpoints and runtime logs for connection errors
+
+If release verification fails:
+- Remove personal credentials from secrets.yaml
+- Rebuild firmware and rerun verification scripts
+
+## Contributing
+
+Contributions are welcome.
+
+Recommended process:
+1. Open an issue describing bug or feature request.
+2. Keep changes focused and testable.
+3. Include clear notes for firmware/runtime impacts.
+4. Validate build and release scripts before submitting.
+
+## Credits
+
+This project builds on:
+- ESPHome
+- Home Assistant voice satellite ecosystem
+- Hubitat platform and community workflows
+- FutureProofHomes Satellite hardware efforts
+
+## License
+
+See LICENSE in this repository for license terms.

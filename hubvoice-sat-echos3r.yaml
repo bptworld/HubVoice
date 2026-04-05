@@ -16,7 +16,7 @@
   hidden_ssid: "false"
   device_name: "hubvoice-sat"
   friendly_name: "HubVoiceSat"
-  firmware_version: "2026.04.03.1"
+  firmware_version: "2026.04.05.1"
 
   # ============================================================================
   # AUDIO FILES

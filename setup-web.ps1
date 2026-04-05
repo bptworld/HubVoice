@@ -216,6 +216,102 @@ function Get-LauncherVersion {
   return "unknown"
 }
 
+function Test-PopulatedSatellitesText([string]$text) {
+  if (-not $text) {
+    return $false
+  }
+
+  foreach ($line in ($text -split "`r?`n")) {
+    $row = $line.Trim()
+    if (-not $row -or $row.StartsWith("#")) {
+      continue
+    }
+    if ($row.Contains(",")) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
+function Get-LegacyStateRoots {
+  $roots = @($root)
+
+  $launcherPath = Get-LauncherPath
+  if ($launcherPath) {
+    $launcherDir = Split-Path -Parent $launcherPath
+    if ($launcherDir) {
+      $roots += $launcherDir
+    }
+  }
+
+  try {
+    $cwd = (Get-Location).Path
+    if ($cwd) {
+      $roots += $cwd
+    }
+  } catch {
+  }
+
+  $seen = @{}
+  $unique = @()
+  foreach ($candidate in $roots) {
+    if (-not $candidate) {
+      continue
+    }
+    try {
+      $resolved = [System.IO.Path]::GetFullPath($candidate)
+    } catch {
+      continue
+    }
+    $key = $resolved.ToLowerInvariant()
+    if ($seen.ContainsKey($key)) {
+      continue
+    }
+    $seen[$key] = $true
+    $unique += $resolved
+  }
+
+  return @($unique)
+}
+
+function Migrate-LegacyUserFiles {
+  if (-not (Test-Path $satellitesPath)) {
+    foreach ($legacyRoot in (Get-LegacyStateRoots)) {
+      $legacySatellitesPath = Join-Path $legacyRoot "satellites.csv"
+      if (-not (Test-Path $legacySatellitesPath)) {
+        continue
+      }
+      try {
+        $legacyText = Get-Content $legacySatellitesPath -Raw -Encoding UTF8
+        if (Test-PopulatedSatellitesText $legacyText) {
+          Set-Content -Path $satellitesPath -Value $legacyText -Encoding UTF8
+          break
+        }
+      } catch {
+      }
+    }
+  }
+
+  if (-not (Test-Path $setupConfigPath)) {
+    foreach ($legacyRoot in (Get-LegacyStateRoots)) {
+      $legacyConfigPath = Join-Path $legacyRoot "hubvoice-sat-setup.json"
+      if (-not (Test-Path $legacyConfigPath)) {
+        continue
+      }
+      try {
+        $legacyRaw = Get-Content $legacyConfigPath -Raw -Encoding UTF8
+        $legacyConfig = $legacyRaw | ConvertFrom-Json
+        if ($legacyConfig) {
+          Set-Content -Path $setupConfigPath -Value $legacyRaw -Encoding UTF8
+          break
+        }
+      } catch {
+      }
+    }
+  }
+}
+
 function Get-SecretsState {
   $state = @{
     wifi_ssid = ""
@@ -276,6 +372,7 @@ function Save-SecretsState([hashtable]$payload) {
 }
 
 function Get-SatellitesText {
+  Migrate-LegacyUserFiles
   if (-not (Test-Path $satellitesPath)) {
     return ""
   }
@@ -364,6 +461,7 @@ function Save-SatellitesText([string]$text) {
 }
 
 function Get-SetupConfig {
+  Migrate-LegacyUserFiles
   $default = @{
     hubvoice_url = ""
     hubitat_host = ""

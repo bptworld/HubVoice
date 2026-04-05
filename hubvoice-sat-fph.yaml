@@ -22,7 +22,7 @@ substitutions:
   hidden_ssid: "false"
   device_name: "hubvoice-sat-fph"
   friendly_name: "HubVoiceSat FPH"
-  firmware_version: "2026.04.03.1"
+  firmware_version: "2026.04.05.1"
   xmos_fw_version: "v1.0.3"
 
   # ============================================================================
@@ -178,6 +178,7 @@ logger:
   level: DEBUG
   logs:
     component: DEBUG
+    tas2780: WARN
     binary_sensor: DEBUG
     micro_wake_word: ERROR
     sensor: WARN
@@ -632,9 +633,11 @@ voice_assistant:
   volume_multiplier: 1
   on_client_connected:
     - wait_until:
-      not: ble.enabled
+        not:
+          ble.enabled
     - wait_until:
-      not: memory_flasher.in_progress
+        not:
+          memory_flasher.in_progress
     - delay: 2s
     - lambda: id(init_in_progress) = false;
     - lambda: |-
@@ -1978,8 +1981,15 @@ script:
             - logger.log:
                 format: "Activating TAS2780 with power mode %d"
                 args: ['id(tas2780_power_mode)']
-            - tas2780.activate:
-                mode: !lambda return id(tas2780_power_mode);
+            - if:
+                condition:
+                  lambda: return id(tas2780_power_mode) >= 2;
+                then:
+                  - tas2780.activate:
+                      mode: 2
+                else:
+                  - tas2780.activate:
+                      mode: 0
             - lambda: id(tas2780_active) = true;
 
   # Master LED dispatcher --- checks state priority and delegates to sub-scripts
@@ -2313,23 +2323,6 @@ script:
                 media_file: easter_egg_tada_sound
                 announcement: true
                 enqueue: false
-
-interval:
-  - interval: 30s
-    then:
-      - if:
-          condition:
-            - lambda: return id(tas2780_active);
-            - for:
-                time: 60s
-                condition:
-                  or:
-                    - media_player.is_idle: external_media_player
-                    - media_player.is_paused: external_media_player
-          then:
-            - logger.log: "Deactivating TAS2780 due to 60 seconds of idle"
-            - tas2780.deactivate:
-            - lambda: id(tas2780_active) = false;
       - if:
           condition:
             lambda: return sound_file == id(factory_reset_initiated_sound);
@@ -2441,4 +2434,21 @@ interval:
                 then:
                   - micro_wake_word.disable_model: stop
 
+interval:
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            and:
+              - lambda: return id(tas2780_active);
+              - for:
+                  time: 60s
+                  condition:
+                    or:
+                      - media_player.is_idle: external_media_player
+                      - media_player.is_paused: external_media_player
+          then:
+            - logger.log: "Deactivating TAS2780 due to 60 seconds of idle"
+            - tas2780.deactivate:
+            - lambda: id(tas2780_active) = false;
 

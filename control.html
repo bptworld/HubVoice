@@ -641,6 +641,7 @@
             satellites: [],
             controls: {},
             draft: {},
+            speakDraft: {},
             capabilities: {},
             activeSatelliteId: '',
             hubMusic: {
@@ -1673,6 +1674,7 @@
 
         function renderSatelliteCard(satellite) {
             const draft = getDraft(satellite.id);
+            const speakText = state.speakDraft[satellite.id] || '';
             const reachableClass = satellite.reachable ? 'good' : 'bad';
             const reachableText = satellite.reachable ? 'ESPHome API reachable' : 'ESPHome API unavailable';
             return `
@@ -1693,7 +1695,7 @@
                             <section class="section">
                                 <h3>Speak</h3>
                                 <div class="row">
-                                    <textarea data-text="${escapeHtml(satellite.id)}" placeholder="Type what this satellite should say..."></textarea>
+                                    <textarea data-text="${escapeHtml(satellite.id)}" placeholder="Type what this satellite should say...">${escapeHtml(speakText)}</textarea>
                                     <button class="btn primary" data-send="${escapeHtml(satellite.id)}">Send Text</button>
                                 </div>
                             </section>
@@ -1725,8 +1727,39 @@
             `;
         }
 
+        function captureFocusedSpeakField() {
+            const active = document.activeElement;
+            if (!(active instanceof HTMLTextAreaElement)) {
+                return null;
+            }
+            const satelliteId = active.dataset?.text;
+            if (!satelliteId) {
+                return null;
+            }
+            return {
+                satelliteId,
+                selectionStart: active.selectionStart,
+                selectionEnd: active.selectionEnd,
+            };
+        }
+
+        function restoreFocusedSpeakField(snapshot) {
+            if (!snapshot?.satelliteId) {
+                return;
+            }
+            const field = document.querySelector(`[data-text="${snapshot.satelliteId}"]`);
+            if (!(field instanceof HTMLTextAreaElement)) {
+                return;
+            }
+            field.focus({ preventScroll: true });
+            if (typeof snapshot.selectionStart === 'number' && typeof snapshot.selectionEnd === 'number') {
+                field.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+            }
+        }
+
         function renderCards() {
             const cards = document.getElementById('cards');
+            const focusedSpeak = captureFocusedSpeakField();
             if (!state.satellites.length) {
                 if (!state.activeSatelliteId) {
                     state.activeSatelliteId = HUB_MUSIC_TAB_ID;
@@ -1738,6 +1771,7 @@
                 } else {
                     cards.innerHTML = `${renderTabs()}<div class="panel card"><p style="margin:0;color:var(--muted);">No satellites configured.</p></div>`;
                 }
+                restoreFocusedSpeakField(focusedSpeak);
                 setGlobalStatus('No satellites configured', 'bad');
                 return;
             }
@@ -1757,6 +1791,7 @@
             } else {
                 cards.innerHTML = `${renderTabs()}${renderSatelliteCard(active)}`;
             }
+            restoreFocusedSpeakField(focusedSpeak);
         }
 
         function renderNumberControl(id, entity, value) {
@@ -1887,6 +1922,7 @@
             try {
                 await api('/answer', { method: 'POST', body: JSON.stringify({ satellite: id, text }) });
                 area.value = '';
+                state.speakDraft[id] = '';
                 showToast(`Queued speech for ${id}.`);
             } catch (error) {
                 showToast(error.message, 'bad');
@@ -1958,63 +1994,7 @@
             if (priorTimer) {
                 clearTimeout(priorTimer);
             }
-            const delayMs = entity === 'speaker_volume' ? 350 : 220;
-            const timer = setTimeout(async () => {
-                levelApplyTimers.delete(key);
-                if (levelApplyInFlight.has(key)) {
-                    // Another request is in flight; keep latest pending value and let it flush next.
-                    return;
-                }
-                const pendingValue = levelApplyPending.get(key);
-                if (pendingValue === undefined) {
-                    return;
-                }
-                levelApplyInFlight.add(key);
-                levelApplyPending.delete(key);
-                try {
-                    let result;
-                    if (entity === 'speaker_volume') {
-                        result = await api('/satellite-media-volume', {
-                            method: 'POST',
-                            body: JSON.stringify({ satellite: id, value: pendingValue })
-                        });
-                    } else {
-                        result = await api('/satellite-number', {
-                            method: 'POST',
-                            body: JSON.stringify({ satellite: id, entity, value: pendingValue })
-                        });
-                    }
-                    const label = state.controls[entity]?.label || entity;
-                    if (entity === 'speaker_volume' && result && result.applied === false) {
-                        showToast(`${id}: ${label} update deferred (device busy).`);
-                    } else {
-                        showToast(`${id}: ${label} set to ${pendingValue}.`);
-                    }
-                } catch (error) {
-                    showToast(error.message, 'bad');
-                } finally {
-                    levelApplyInFlight.delete(key);
-                    if (levelApplyPending.has(key)) {
-                        queueImmediateLevelApply(id, entity);
-                    }
-                }
-            }, delayMs);
-            levelApplyTimers.set(key, timer);
-        }
-
-        function queueImmediateLevelApply(id, entity) {
-            if (!isControlSettable(id, entity)) {
-                return;
-            }
-            const key = `${id}:${entity}`;
-            const draft = getDraft(id);
-            const value = Number(draft[entity]);
-            levelApplyPending.set(key, value);
-            const priorTimer = levelApplyTimers.get(key);
-            if (priorTimer) {
-                clearTimeout(priorTimer);
-            }
-            const delayMs = entity === 'speaker_volume' ? 350 : 220;
+            const delayMs = entity === 'speaker_volume' ? 100 : 80;
             const timer = setTimeout(async () => {
                 levelApplyTimers.delete(key);
                 if (levelApplyInFlight.has(key)) {
@@ -2695,14 +2675,17 @@
         });
 
         document.addEventListener('input', (event) => {
+            const speakField = event.target.closest('[data-text]');
+            if (speakField) {
+                state.speakDraft[speakField.dataset.text] = speakField.value;
+                return;
+            }
+
             const range = event.target.closest('[data-range]');
             if (range) {
                 const [id, entity] = range.dataset.range.split(':');
                 syncRange(id, entity, range.value);
-                // Don't send speaker_volume on input (drag); wait for change event (mouse release)
-                if (entity !== 'speaker_volume') {
-                    queueImmediateLevelApply(id, entity);
-                }
+                queueImmediateLevelApply(id, entity);
                 return;
             }
 
@@ -2713,10 +2696,7 @@
                 const numeric = Number(input.value || meta.default);
                 const clamped = Math.max(meta.min, Math.min(meta.max, numeric));
                 syncRange(id, entity, clamped);
-                // Don't send speaker_volume on input (during typing); wait for change event
-                if (entity !== 'speaker_volume') {
-                    queueImmediateLevelApply(id, entity);
-                }
+                queueImmediateLevelApply(id, entity);
                 return;
             }
 

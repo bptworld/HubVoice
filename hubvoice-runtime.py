@@ -3,6 +3,8 @@
 # All future changes must preserve this path for reliability.
 
 import asyncio
+import atexit
+import concurrent.futures
 import contextlib
 import math
 import hashlib
@@ -94,10 +96,42 @@ try:
 except Exception:  # pragma: no cover - non-Windows fallback
     msvcrt = None
 
+try:
+    import aioesphomeapi.client as _aioesphome_client_mod
+    import aioesphomeapi.client_base as _aioesphome_client_base_mod
+    import aioesphomeapi.util as _aioesphome_util_mod
+except Exception:  # pragma: no cover - optional runtime dependency
+    _aioesphome_client_mod = None
+    _aioesphome_client_base_mod = None
+    _aioesphome_util_mod = None
+
 from aioesphomeapi import APIClient, MediaPlayerCommand
 from aioesphomeapi.model import VoiceAssistantEventType, VoiceAssistantTimerEventType
 from faster_whisper import WhisperModel
 from piper.voice import PiperVoice
+
+
+def _patch_aioesphomeapi_task_scheduling() -> None:
+    """Work around Python 3.13 task scheduling issues in aioesphomeapi reconnect flows."""
+    if sys.version_info < (3, 13):
+        return
+    if not (_aioesphome_client_mod and _aioesphome_client_base_mod and _aioesphome_util_mod):
+        return
+
+    def _safe_create_task(coro, *, name=None, loop=None):
+        target_loop = loop or asyncio.get_running_loop()
+        return target_loop.create_task(coro, name=name)
+
+    try:
+        _aioesphome_util_mod.create_eager_task = _safe_create_task
+        _aioesphome_client_mod.create_eager_task = _safe_create_task
+        _aioesphome_client_base_mod.create_eager_task = _safe_create_task
+        logging.info("Applied aioesphomeapi Python 3.13 task scheduling compatibility patch")
+    except Exception as exc:
+        logging.warning("Failed to apply aioesphomeapi compatibility patch: %s", exc)
+
+
+_patch_aioesphomeapi_task_scheduling()
 
 
 if getattr(sys, "frozen", False):
@@ -184,7 +218,7 @@ SET_NUMBER_TIMEOUT = 5.0  # seconds
 ENTITY_LIST_TIMEOUT = 5.0  # seconds
 SATELLITE_CAP_CACHE_TTL = 30.0  # seconds
 HUBITAT_REQUEST_TIMEOUT = 20  # seconds
-SATELLITE_MEDIA_DELAY = 0.3  # seconds
+SATELLITE_MEDIA_DELAY = 0.05  # seconds
 RECONNECT_DELAY = 2  # seconds
 VOICE_BRIDGE_CONNECT_TIMEOUT = 3.0  # seconds
 TTS_PRESTOP_CONNECT_TIMEOUT = 1.5  # seconds
@@ -224,8 +258,8 @@ HUBMUSIC_STEREO_MAX_START_SKEW_MS = 55
 HUBMUSIC_STEREO_RESYNC_MAX_PASSES = 3
 HUBMUSIC_STEREO_RESYNC_SETTLE_SECONDS = 0.09
 HUBMUSIC_STEREO_SHARED_LAUNCH_DELAY_MS = 2600
-SATELLITE_MEDIA_VOLUME_MIN_APPLY_INTERVAL_SECONDS = 1.0
-SATELLITE_MEDIA_VOLUME_MIN_DELTA_PERCENT = 2.0
+SATELLITE_MEDIA_VOLUME_MIN_APPLY_INTERVAL_SECONDS = 0.2
+SATELLITE_MEDIA_VOLUME_MIN_DELTA_PERCENT = 0.5
 
 # Voice broadcast flow
 BROADCAST_PENDING_TIMEOUT_SECS = 25
@@ -514,54 +548,137 @@ class HubMusicState:
 
 
 class SatelliteConnectionPool:
-    """Cache and reuse satellite API client connections."""
+    """Persistent control-command connection pool on a dedicated asyncio loop."""
     def __init__(self, max_connections: int = 5):
         self._pool: dict[str, APIClient] = {}
-        self._locks: dict[str, threading.Lock] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         self._max_connections = max_connections
-        self._pool_lock = threading.Lock()
-    
-    async def get_client(self, host: str) -> APIClient:
-        """Get or create cached connection to satellite."""
-        if host not in self._locks:
-            with self._pool_lock:
-                if host not in self._locks:
-                    self._locks[host] = threading.Lock()
-        
-        with self._locks[host]:
-            if host in self._pool:
-                return self._pool[host]
-            
-            # Create new connection
-            logging.info("Creating new satellite connection to %s", host)
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._thread_main, daemon=True)
+        self._loop = asyncio.new_event_loop()
+        self._thread.start()
+        self._ready.wait(timeout=5)
+
+    def _thread_main(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._ready.set()
+        self._loop.run_forever()
+
+    def _run(self, coro, timeout: float = 4.0):
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(timeout=timeout)
+
+    async def _get_client_async(self, host: str) -> APIClient:
+        lock = self._locks.get(host)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[host] = lock
+
+        async with lock:
+            existing = self._pool.get(host)
+            if existing is not None:
+                return existing
+
+            if len(self._pool) >= self._max_connections:
+                # Evict one stale connection to keep memory/socket usage bounded.
+                evict_host = next(iter(self._pool.keys()))
+                await self._disconnect_host_async(evict_host)
+
             client = APIClient(host, 6054, None, client_info="HubVoiceSatRuntime")
-            try:
-                await asyncio.wait_for(
-                    client.connect(login=False),
-                    timeout=10.0
-                )
-            except asyncio.TimeoutError:
-                raise RuntimeError(f"Timeout connecting to satellite {host} (10s)")
-            except Exception as e:
-                raise RuntimeError(f"Failed to connect to satellite {host}: {e}")
-            
+            timeout_s = float(_command_tuning().get("media_connect_timeout", 2.0))
+            await asyncio.wait_for(client.connect(login=False), timeout=max(0.6, timeout_s))
             self._pool[host] = client
             return client
-    
-    async def close_all(self):
-        """Close all cached connections."""
-        for client in self._pool.values():
+
+    async def _disconnect_host_async(self, host: str) -> None:
+        client = self._pool.pop(host, None)
+        if client is None:
+            return
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+    async def _resolve_media_key_async(self, host: str) -> int:
+        cached = _media_player_key_cache.get(host)
+        if cached is not None:
+            return int(cached)
+
+        client = await self._get_client_async(host)
+        entities, _ = await asyncio.wait_for(client.list_entities_services(), timeout=min(ENTITY_LIST_TIMEOUT, 2.0))
+        media = _pick_media_player(entities)
+        if media is None:
+            raise RuntimeError(f"Satellite {host} has no media player")
+        key = int(media.key)
+        _media_player_key_cache[host] = key
+        return key
+
+    async def _media_command_async(
+        self,
+        host: str,
+        *,
+        command: MediaPlayerCommand | None = None,
+        media_url: str | None = None,
+        announcement: bool = False,
+        volume: float | None = None,
+    ) -> None:
+        for attempt in range(2):
             try:
-                await client.disconnect()
-            except Exception as e:
-                logging.warning("Error disconnecting satellite: %s", e)
-        self._pool.clear()
+                client = await self._get_client_async(host)
+                key = await self._resolve_media_key_async(host)
+                client.media_player_command(
+                    key,
+                    command=command,
+                    media_url=media_url,
+                    announcement=announcement,
+                    volume=volume,
+                )
+                return
+            except Exception:
+                _media_player_key_cache.pop(host, None)
+                await self._disconnect_host_async(host)
+                if attempt >= 1:
+                    raise
+
+    def media_command(
+        self,
+        host: str,
+        *,
+        command: MediaPlayerCommand | None = None,
+        media_url: str | None = None,
+        announcement: bool = False,
+        volume: float | None = None,
+        timeout: float = 4.0,
+    ) -> None:
+        self._run(
+            self._media_command_async(
+                host,
+                command=command,
+                media_url=media_url,
+                announcement=announcement,
+                volume=volume,
+            ),
+            timeout=timeout,
+        )
+
+    async def close_all(self):
+        for host in list(self._pool.keys()):
+            await self._disconnect_host_async(host)
+
+    def shutdown(self) -> None:
+        with contextlib.suppress(Exception):
+            self._run(self.close_all(), timeout=3.0)
+        if self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        with contextlib.suppress(Exception):
+            self._thread.join(timeout=1.0)
 
 
 _RATE_LIMIT_WINDOW = deque()  # Track request times for rate limiting
 _RATE_LIMIT_LOCK = threading.Lock()
 _APP_STATE = AppState()
 _SATELLITE_POOL = SatelliteConnectionPool()
+atexit.register(_SATELLITE_POOL.shutdown)
 _HUBITAT_BREAKER = HubitatCircuitBreaker()
 _METRICS = Metrics()
 _REQUEST_CONTEXT = RequestContext()
@@ -689,6 +806,82 @@ def _save_runtime_config_raw(config: dict) -> None:
     if not isinstance(config, dict):
         raise ValueError("config must be a dictionary")
     CONFIG_PATH.write_text(json.dumps(config, indent=4), encoding="utf-8")
+
+
+def _get_command_mode() -> str:
+    cfg = _load_runtime_config_raw()
+    raw = str(cfg.get("fast_command_mode", "fast")).strip().lower()
+    if raw in {"normal", "off", "false", "0", "slow"}:
+        return "normal"
+    return "fast"
+
+
+def _set_command_mode(mode: str) -> str:
+    normalized = "normal" if str(mode or "").strip().lower() in {"normal", "off", "false", "0", "slow"} else "fast"
+    cfg = _load_runtime_config_raw()
+    cfg["fast_command_mode"] = normalized
+    _save_runtime_config_raw(cfg)
+    return normalized
+
+
+def _command_tuning() -> dict[str, float]:
+    if _get_command_mode() == "fast":
+        return {
+            "volume_apply_interval": 0.15,
+            "volume_delta": 0.5,
+            "volume_throttle_interval": 0.05,
+            "media_connect_timeout": 1.8,
+        }
+    return {
+        "volume_apply_interval": 0.4,
+        "volume_delta": 1.5,
+        "volume_throttle_interval": 0.2,
+        "media_connect_timeout": 3.0,
+    }
+
+
+_CONTROL_LATENCY: dict[str, deque[float]] = {}
+_CONTROL_LATENCY_LOCK = threading.Lock()
+
+
+def _record_control_latency(name: str, elapsed_ms: float) -> None:
+    key = str(name or "unknown").strip().lower() or "unknown"
+    with _CONTROL_LATENCY_LOCK:
+        bucket = _CONTROL_LATENCY.get(key)
+        if bucket is None:
+            bucket = deque(maxlen=200)
+            _CONTROL_LATENCY[key] = bucket
+        bucket.append(float(max(0.0, elapsed_ms)))
+
+
+def _control_latency_snapshot() -> dict:
+    def _pct(values: list[float], q: float) -> float:
+        if not values:
+            return 0.0
+        idx = int(max(0, min(len(values) - 1, round((len(values) - 1) * q))))
+        return float(values[idx])
+
+    with _CONTROL_LATENCY_LOCK:
+        data = {k: list(v) for k, v in _CONTROL_LATENCY.items()}
+
+    operations: dict[str, dict] = {}
+    for name, values in data.items():
+        if not values:
+            continue
+        ordered = sorted(float(v) for v in values)
+        operations[name] = {
+            "count": len(ordered),
+            "p50_ms": round(_pct(ordered, 0.50), 1),
+            "p95_ms": round(_pct(ordered, 0.95), 1),
+            "max_ms": round(float(ordered[-1]), 1),
+        }
+
+    return {
+        "ok": True,
+        "mode": _get_command_mode(),
+        "operations": operations,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
 
 
 def _load_persisted_tone_settings_for_host(satellite_host: str) -> tuple[float, float]:
@@ -2448,7 +2641,7 @@ async def send_to_satellite_async(satellite_host: str, media_url: str) -> None:
     cached_key = _media_player_key_cache.get(satellite_host)
     client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
     try:
-        await asyncio.wait_for(client.connect(login=True), timeout=CONNECTION_TIMEOUT)
+        await asyncio.wait_for(client.connect(login=False), timeout=CONNECTION_TIMEOUT)
         if cached_key is None:
             entities, _ = await asyncio.wait_for(
                 client.list_entities_services(),
@@ -2513,11 +2706,13 @@ def _remember_user_locked_media_volume(satellite_host: str, volume_percent: floa
     return normalized
 
 
-def _throttle_satellite_media_volume(satellite_host: str, min_interval_seconds: float = 0.75) -> None:
+def _throttle_satellite_media_volume(satellite_host: str, min_interval_seconds: float | None = None) -> None:
     """Rate-limit media volume writes per satellite to reduce device overload/reboots."""
     host = str(satellite_host or "").strip()
     if not host:
         return
+    if min_interval_seconds is None:
+        min_interval_seconds = float(_command_tuning().get("volume_throttle_interval", 0.1))
     min_interval = max(0.0, float(min_interval_seconds))
     if min_interval <= 0.0:
         return
@@ -2546,16 +2741,20 @@ def _should_apply_satellite_media_volume(satellite_host: str, volume_percent: fl
     if not entry:
         return True, 0.0
 
+    tuning = _command_tuning()
+    min_apply_interval = float(tuning.get("volume_apply_interval", SATELLITE_MEDIA_VOLUME_MIN_APPLY_INTERVAL_SECONDS))
+    min_delta = float(tuning.get("volume_delta", SATELLITE_MEDIA_VOLUME_MIN_DELTA_PERCENT))
+
     last_ts = float(entry.get("ts", 0.0))
     last_value = float(entry.get("value", volume_percent))
     elapsed = now - last_ts
     delta = abs(float(volume_percent) - last_value)
 
-    if elapsed >= SATELLITE_MEDIA_VOLUME_MIN_APPLY_INTERVAL_SECONDS:
+    if elapsed >= min_apply_interval:
         return True, 0.0
-    if delta >= SATELLITE_MEDIA_VOLUME_MIN_DELTA_PERCENT:
+    if delta >= min_delta:
         return True, 0.0
-    return False, max(0.0, SATELLITE_MEDIA_VOLUME_MIN_APPLY_INTERVAL_SECONDS - elapsed)
+    return False, max(0.0, min_apply_interval - elapsed)
 
 
 def _mark_satellite_media_volume_applied(satellite_host: str, volume_percent: float) -> None:
@@ -2606,7 +2805,7 @@ async def _read_satellite_tone_settings_async(satellite_host: str) -> tuple[floa
         return None
 
     client = APIClient(host, 6054, None, client_info="HubVoiceSatRuntime")
-    connect_timeout = min(CONNECTION_TIMEOUT, 3.0)
+    connect_timeout = min(CONNECTION_TIMEOUT, float(_command_tuning().get("media_connect_timeout", 3.0)))
     entity_timeout = min(ENTITY_LIST_TIMEOUT, 2.0)
     state_timeout = 1.6
     try:
@@ -2885,7 +3084,7 @@ async def play_media_on_satellite_async(satellite_host: str, media_url: str, ann
     cached_key = _media_player_key_cache.get(satellite_host)
     client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
     try:
-        await asyncio.wait_for(client.connect(login=True), timeout=CONNECTION_TIMEOUT)
+        await asyncio.wait_for(client.connect(login=False), timeout=CONNECTION_TIMEOUT)
         if cached_key is None:
             entities, _ = await asyncio.wait_for(
                 client.list_entities_services(),
@@ -2920,7 +3119,16 @@ async def play_media_on_satellite_async(satellite_host: str, media_url: str, ann
 
 def play_media_on_satellite(satellite_host: str, media_url: str, announcement: bool = False) -> None:
     """Synchronous wrapper for play_media_on_satellite_async."""
-    asyncio.run(play_media_on_satellite_async(satellite_host, media_url, announcement=announcement))
+    if not satellite_host or not media_url:
+        raise ValueError("satellite_host and media_url are required")
+    _SATELLITE_POOL.media_command(
+        satellite_host,
+        command=MediaPlayerCommand.PLAY,
+        media_url=media_url,
+        announcement=announcement,
+        timeout=max(2.0, float(_command_tuning().get("media_connect_timeout", 2.0)) + 1.5),
+    )
+    time.sleep(SATELLITE_MEDIA_DELAY)
 
 
 def send_to_satellite(satellite_host: str, media_url: str) -> None:
@@ -2937,7 +3145,7 @@ def prepare_satellite_for_tts(satellite_host: str) -> None:
         cached_key = _media_player_key_cache.get(satellite_host)
         client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
         try:
-            await asyncio.wait_for(client.connect(login=True), timeout=TTS_PRESTOP_CONNECT_TIMEOUT)
+            await asyncio.wait_for(client.connect(login=False), timeout=TTS_PRESTOP_CONNECT_TIMEOUT)
             if cached_key is None:
                 entities, _ = await asyncio.wait_for(
                     client.list_entities_services(),
@@ -2970,7 +3178,7 @@ async def stop_media_on_satellite_async(satellite_host: str, announcement: bool 
     cached_key = _media_player_key_cache.get(satellite_host)
     client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
     try:
-        await asyncio.wait_for(client.connect(login=True), timeout=CONNECTION_TIMEOUT)
+        await asyncio.wait_for(client.connect(login=False), timeout=CONNECTION_TIMEOUT)
         if cached_key is None:
             entities, _ = await asyncio.wait_for(
                 client.list_entities_services(),
@@ -2995,7 +3203,14 @@ async def stop_media_on_satellite_async(satellite_host: str, announcement: bool 
 
 def stop_media_on_satellite(satellite_host: str, announcement: bool = False) -> None:
     """Synchronous wrapper for stop_media_on_satellite_async."""
-    asyncio.run(stop_media_on_satellite_async(satellite_host, announcement=announcement))
+    if not satellite_host:
+        raise ValueError("satellite_host is required")
+    _SATELLITE_POOL.media_command(
+        satellite_host,
+        command=MediaPlayerCommand.STOP,
+        announcement=announcement,
+        timeout=max(2.0, float(_command_tuning().get("media_connect_timeout", 2.0)) + 1.0),
+    )
 
 
 async def _fast_stop_media_on_satellite_async(satellite_host: str) -> bool:
@@ -3009,7 +3224,7 @@ async def _fast_stop_media_on_satellite_async(satellite_host: str) -> bool:
 
     client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
     try:
-        await asyncio.wait_for(client.connect(login=True), timeout=1.2)
+        await asyncio.wait_for(client.connect(login=False), timeout=1.2)
         client.media_player_command(cached_key, command=MediaPlayerCommand.STOP, announcement=False)
         return True
     except Exception:
@@ -3155,7 +3370,7 @@ async def stop_satellite_playback_async(satellite_host: str) -> None:
 
     client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
     try:
-        await asyncio.wait_for(client.connect(login=True), timeout=CONNECTION_TIMEOUT)
+        await asyncio.wait_for(client.connect(login=False), timeout=CONNECTION_TIMEOUT)
         entities, _ = await asyncio.wait_for(
             client.list_entities_services(),
             timeout=ENTITY_LIST_TIMEOUT,
@@ -3183,7 +3398,7 @@ async def set_satellite_media_mute_async(satellite_host: str, muted: bool) -> No
 
     client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
     try:
-        await asyncio.wait_for(client.connect(login=True), timeout=CONNECTION_TIMEOUT)
+        await asyncio.wait_for(client.connect(login=False), timeout=CONNECTION_TIMEOUT)
         entities, _ = await asyncio.wait_for(
             client.list_entities_services(),
             timeout=ENTITY_LIST_TIMEOUT,
@@ -3193,7 +3408,7 @@ async def set_satellite_media_mute_async(satellite_host: str, muted: bool) -> No
             raise RuntimeError(f"Satellite {satellite_host} has no media player")
         command = MediaPlayerCommand.MUTE if muted else MediaPlayerCommand.UNMUTE
         client.media_player_command(media.key, command=command)
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.02)
     finally:
         try:
             await client.disconnect()
@@ -3203,7 +3418,15 @@ async def set_satellite_media_mute_async(satellite_host: str, muted: bool) -> No
 
 def set_satellite_media_mute(satellite_host: str, muted: bool) -> None:
     """Synchronous wrapper for set_satellite_media_mute_async."""
-    asyncio.run(set_satellite_media_mute_async(satellite_host, muted))
+    if not satellite_host:
+        raise ValueError("satellite_host is required")
+    command = MediaPlayerCommand.MUTE if muted else MediaPlayerCommand.UNMUTE
+    _SATELLITE_POOL.media_command(
+        satellite_host,
+        command=command,
+        announcement=False,
+        timeout=max(2.0, float(_command_tuning().get("media_connect_timeout", 2.0)) + 1.0),
+    )
 
 
 async def set_satellite_media_volume_async(satellite_host: str, volume_percent: float) -> None:
@@ -3226,12 +3449,12 @@ async def set_satellite_media_volume_async(satellite_host: str, volume_percent: 
     cached_key = _media_player_key_cache.get(satellite_host)
     client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
     try:
-        await asyncio.wait_for(client.connect(login=True), timeout=connect_timeout)
+        await asyncio.wait_for(client.connect(login=False), timeout=connect_timeout)
         if cached_key is not None:
             # Fast path: use cached key, skip entity enumeration.
             try:
                 client.media_player_command(cached_key, volume=media_volume)
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.01)
                 return
             except Exception:
                 # Stale key â€” fall through to full enumeration.
@@ -3245,7 +3468,7 @@ async def set_satellite_media_volume_async(satellite_host: str, volume_percent: 
             raise RuntimeError(f"Satellite {satellite_host} has no media player")
         _media_player_key_cache[satellite_host] = media.key
         client.media_player_command(media.key, volume=media_volume)
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.01)
     finally:
         try:
             await client.disconnect()
@@ -3255,7 +3478,17 @@ async def set_satellite_media_volume_async(satellite_host: str, volume_percent: 
 
 def set_satellite_media_volume(satellite_host: str, volume_percent: float) -> None:
     """Synchronous wrapper for set_satellite_media_volume_async."""
-    asyncio.run(set_satellite_media_volume_async(satellite_host, volume_percent))
+    if not satellite_host:
+        raise ValueError("satellite_host is required")
+    vol = _normalize_volume_percent(volume_percent)
+    _throttle_satellite_media_volume(satellite_host)
+    _SATELLITE_POOL.media_command(
+        satellite_host,
+        volume=(vol / 100.0),
+        announcement=False,
+        timeout=max(2.0, float(_command_tuning().get("media_connect_timeout", 2.0)) + 1.0),
+    )
+    time.sleep(0.01)
 
 
 def _resolve_entity_aliases(entity_object_id: str) -> list[str]:
@@ -4601,7 +4834,7 @@ def stop_hubmusic_route(payload: dict, *, default_snapshot: dict | None = None) 
             "status": hubmusic_status_snapshot(),
         }
 
-    for target in targets:
+    def _stop_target(target: dict) -> tuple[dict | None, dict | None, dict | None]:
         sat_id = str(target.get("id", ""))
         sat_alias = str(target.get("alias", ""))
         sat_host = str(target.get("host", ""))
@@ -4611,14 +4844,13 @@ def stop_hubmusic_route(payload: dict, *, default_snapshot: dict | None = None) 
         try:
             stop_media_on_satellite(sat_host, announcement=False)
             duration_ms = int((time.perf_counter() - started) * 1000)
-            stopped.append({
+            return ({
                 "id": sat_id,
                 "alias": sat_alias,
                 "host": sat_host,
                 "duration_ms": duration_ms,
                 "attempt": attempt,
-            })
-            continue
+            }, None, None)
         except Exception as first_exc:
             logging.warning("HubMusic stop first attempt failed for %s (%s): %s", sat_id, sat_host, first_exc)
 
@@ -4627,31 +4859,38 @@ def stop_hubmusic_route(payload: dict, *, default_snapshot: dict | None = None) 
         try:
             stop_media_on_satellite(sat_host, announcement=False)
             duration_ms = int((time.perf_counter() - retry_started) * 1000)
-            stopped.append({
+            stopped_entry = {
                 "id": sat_id,
                 "alias": sat_alias,
                 "host": sat_host,
                 "duration_ms": duration_ms,
                 "attempt": attempt,
-            })
-            retried.append({
-                "id": sat_id,
-                "alias": sat_alias,
-                "host": sat_host,
-                "duration_ms": duration_ms,
-                "attempt": attempt,
-            })
+            }
+            return (stopped_entry, None, dict(stopped_entry))
         except Exception as retry_exc:
             duration_ms = int((time.perf_counter() - retry_started) * 1000)
-            failed.append({
+            failed_entry = {
                 "id": sat_id,
                 "alias": sat_alias,
                 "host": sat_host,
                 "duration_ms": duration_ms,
                 "attempt": attempt,
                 "error": str(retry_exc),
-            })
+            }
             logging.error("HubMusic stop failed for %s (%s): %s", sat_id, sat_host, retry_exc)
+            return (None, failed_entry, None)
+
+    max_workers = max(1, min(8, len(targets)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_stop_target, target) for target in targets]
+        for future in concurrent.futures.as_completed(futures):
+            stopped_entry, failed_entry, retried_entry = future.result()
+            if stopped_entry is not None:
+                stopped.append(stopped_entry)
+            if failed_entry is not None:
+                failed.append(failed_entry)
+            if retried_entry is not None:
+                retried.append(retried_entry)
 
     _HUB_MUSIC_STATE.stop(stopped)
     _HUB_MUSIC_STATE.set_results("stop", stopped=stopped, failed=failed, retried=retried, exclude_satellite=exclude_id, mode=mode)
@@ -6747,7 +6986,7 @@ def cleanup_resources() -> None:
         logging.warning("Error clearing entity cache: %s", e)
     
     try:
-        asyncio.run(_SATELLITE_POOL.close_all())
+        _SATELLITE_POOL.shutdown()
     except Exception as e:
         logging.warning("Error closing satellite connections: %s", e)
     
@@ -6865,10 +7104,12 @@ class RuntimeHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=500)
 
     def _handle_satellite_media_volume_request(self, payload: dict) -> None:
+        started = time.perf_counter()
         sat = self._resolve_satellite(payload)
         value = payload.get("value")
         if not sat or value is None:
             self._send_json({"ok": False, "error": "Missing or invalid params: satellite, value"}, status=400)
+            _record_control_latency("satellite_media_volume", (time.perf_counter() - started) * 1000.0)
             return
         numeric_value = _remember_user_locked_media_volume(sat["host"], value)
         should_apply, wait_s = _should_apply_satellite_media_volume(sat["host"], numeric_value)
@@ -6883,6 +7124,7 @@ class RuntimeHandler(BaseHTTPRequestHandler):
                     "message": f"rate_limited_{wait_s:.2f}s",
                 }
             )
+            _record_control_latency("satellite_media_volume", (time.perf_counter() - started) * 1000.0)
             return
 
         try:
@@ -6890,6 +7132,7 @@ class RuntimeHandler(BaseHTTPRequestHandler):
             _mark_satellite_media_volume_applied(sat["host"], numeric_value)
             _update_control_deck_state(sat["id"], speaker_volume=numeric_value)
             self._send_json({"ok": True, "satellite": sat["id"], "value": numeric_value, "applied": True})
+            _record_control_latency("satellite_media_volume", (time.perf_counter() - started) * 1000.0)
             return
         except Exception as exc:
             logging.warning("satellite-media-volume deferred for %s: %s", sat["id"], exc)
@@ -6902,8 +7145,10 @@ class RuntimeHandler(BaseHTTPRequestHandler):
                     "message": "speaker_busy",
                 }
             )
+            _record_control_latency("satellite_media_volume", (time.perf_counter() - started) * 1000.0)
 
     def _handle_satellite_media_request(self, payload: dict) -> None:
+        started = time.perf_counter()
         sat = self._resolve_satellite(payload)
         muted_raw = payload.get("muted")
         if isinstance(muted_raw, bool):
@@ -6912,18 +7157,22 @@ class RuntimeHandler(BaseHTTPRequestHandler):
             muted_str = str(muted_raw or "").strip().lower()
             if muted_str not in {"on", "off", "true", "false", "1", "0"}:
                 self._send_json({"ok": False, "error": "Missing or invalid params: satellite, muted (on/off)"}, status=400)
+                _record_control_latency("satellite_media_mute", (time.perf_counter() - started) * 1000.0)
                 return
             muted = muted_str in {"on", "true", "1"}
         if not sat:
             self._send_json({"ok": False, "error": "Missing or invalid params: satellite, muted (on/off)"}, status=400)
+            _record_control_latency("satellite_media_mute", (time.perf_counter() - started) * 1000.0)
             return
         try:
             set_satellite_media_mute(sat["host"], muted)
             _update_control_deck_state(sat["id"], speaker_muted=muted)
             self._send_json({"ok": True, "satellite": sat["id"], "muted": muted})
+            _record_control_latency("satellite_media_mute", (time.perf_counter() - started) * 1000.0)
         except Exception as exc:
             logging.error("satellite-media error for %s: %s", sat["id"], exc)
             self._send_json({"ok": False, "error": str(exc)}, status=500)
+            _record_control_latency("satellite_media_mute", (time.perf_counter() - started) * 1000.0)
 
     def _handle_airplay_status_request(self) -> None:
         self._send_json({"ok": True, "status": airplay_status_snapshot()})
@@ -6953,6 +7202,7 @@ class RuntimeHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": ok, "message": message, "status": status}, status=code)
 
     def _handle_hubmusic_play_request(self, payload: dict) -> None:
+        started = time.perf_counter()
         try:
             result = start_hubmusic_route(payload)
             status_code = 200 if result.get("ok") else 500
@@ -6967,8 +7217,11 @@ class RuntimeHandler(BaseHTTPRequestHandler):
             _APP_STATE.update(last_action="hubmusic_error", last_error=message)
             logging.error("hubmusic-play error: %s", exc)
             self._send_json({"ok": False, "error": message}, status=500)
+        finally:
+            _record_control_latency("hubmusic_play", (time.perf_counter() - started) * 1000.0)
 
     def _handle_hubmusic_stop_request(self, payload: dict) -> None:
+        started = time.perf_counter()
         try:
             result = stop_hubmusic_route(payload)
             self._send_json(result)
@@ -6978,6 +7231,16 @@ class RuntimeHandler(BaseHTTPRequestHandler):
             _APP_STATE.update(last_action="hubmusic_error", last_error=message)
             logging.error("hubmusic-stop error: %s", exc)
             self._send_json({"ok": False, "error": message}, status=500)
+        finally:
+            _record_control_latency("hubmusic_stop", (time.perf_counter() - started) * 1000.0)
+
+    def _handle_command_mode_request(self, payload: dict) -> None:
+        mode_raw = str(payload.get("mode") or "").strip().lower()
+        mode = _set_command_mode(mode_raw)
+        self._send_json({"ok": True, "mode": mode, "tuning": _command_tuning()})
+
+    def _handle_command_latency_request(self) -> None:
+        self._send_json(_control_latency_snapshot())
 
     def _handle_hubmusic_stereo_test_request(self, payload: dict) -> None:
         try:
@@ -7842,6 +8105,9 @@ class RuntimeHandler(BaseHTTPRequestHandler):
             if parsed.path == "/hubmusic/stereo-sync-diagnostics":
                 self._handle_hubmusic_stereo_sync_diagnostics_request()
                 return
+            if parsed.path == "/command-mode":
+                self._handle_command_mode_request(payload)
+                return
             if parsed.path == "/dlna/start":
                 self._handle_dlna_start_request(payload)
                 return
@@ -7886,6 +8152,7 @@ class RuntimeHandler(BaseHTTPRequestHandler):
                     "last_action": state.get("last_action", "idle"),
                     "last_error": state.get("last_error", ""),
                     "last_transcript": state.get("last_transcript", ""),
+                    "command_mode": _get_command_mode(),
                     "voice_assistant": {sid: b.snapshot() for sid, b in _VOICE_BRIDGES.items()},
                     "scheduler": _SCHEDULE_MANAGER.snapshot(),
                 }
@@ -7924,6 +8191,10 @@ class RuntimeHandler(BaseHTTPRequestHandler):
                     **_SCHEDULE_MANAGER.snapshot(),
                 }
             )
+            return
+
+        if parsed.path == "/command-latency":
+            self._handle_command_latency_request()
             return
 
         if parsed.path == "/satellites":
@@ -8184,3 +8455,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -135,6 +135,9 @@ $deviceName = Get-YamlValue -Path $yamlPath -Key "device_name"
 $fphYamlPath = Join-Path $repoRoot "hubvoice-sat-fph.yaml"
 $fphVersion = Get-YamlValue -Path $fphYamlPath -Key "firmware_version"
 $fphDeviceName = Get-YamlValue -Path $fphYamlPath -Key "device_name"
+$ld2410YamlPath = Join-Path $repoRoot "hubvoice-sat-fph-ld2410.yaml"
+$ld2410Version = Get-YamlValue -Path $ld2410YamlPath -Key "firmware_version"
+$ld2410DeviceName = Get-YamlValue -Path $ld2410YamlPath -Key "device_name"
 if (-not $version) {
   $version = (Get-Date -Format "yyyy.MM.dd.HHmm")
 }
@@ -146,6 +149,12 @@ if (-not $fphVersion) {
 }
 if (-not $fphDeviceName) {
   $fphDeviceName = "hubvoice-sat-fph"
+}
+if (-not $ld2410Version) {
+  $ld2410Version = $fphVersion
+}
+if (-not $ld2410DeviceName) {
+  $ld2410DeviceName = "hubvoice-sat-fph-ld2410"
 }
 
 $buildDirs = @(
@@ -159,10 +168,17 @@ $fphBuildDirs = @(
   (Join-Path $repoRoot ".esphome\build\sat-kitchen\.pioenvs\sat-kitchen")
 )
 
+$ld2410BuildDirs = @(
+  (Join-Path $repoRoot ".esphome\build\$ld2410DeviceName\.pioenvs\$ld2410DeviceName"),
+  (Join-Path $repoRoot ".esphome\build\$ld2410DeviceName\.pio\build\$ld2410DeviceName")
+)
+
 $sourceOtaBin = $null
 $sourceFactoryBin = $null
 $fphSourceOtaBin = $null
 $fphSourceFactoryBin = $null
+$ld2410SourceOtaBin = $null
+$ld2410SourceFactoryBin = $null
 
 foreach ($candidateDir in $buildDirs) {
   $candidateOtaBin = Join-Path $candidateDir "firmware.ota.bin"
@@ -180,6 +196,16 @@ foreach ($candidateDir in $fphBuildDirs) {
   if ((Test-Path $candidateOtaBin) -and (Test-Path $candidateFactoryBin)) {
     $fphSourceOtaBin = $candidateOtaBin
     $fphSourceFactoryBin = $candidateFactoryBin
+    break
+  }
+}
+
+foreach ($candidateDir in $ld2410BuildDirs) {
+  $candidateOtaBin = Join-Path $candidateDir "firmware.ota.bin"
+  $candidateFactoryBin = Join-Path $candidateDir "firmware.factory.bin"
+  if ((Test-Path $candidateOtaBin) -and (Test-Path $candidateFactoryBin)) {
+    $ld2410SourceOtaBin = $candidateOtaBin
+    $ld2410SourceFactoryBin = $candidateFactoryBin
     break
   }
 }
@@ -234,6 +260,31 @@ if (-not $fphSourceOtaBin -or -not $fphSourceFactoryBin -or -not (Test-Path $fph
   }
 }
 
+if (-not $ld2410SourceOtaBin -or -not $ld2410SourceFactoryBin -or -not (Test-Path $ld2410SourceOtaBin) -or -not (Test-Path $ld2410SourceFactoryBin)) {
+  if (-not (Test-Path $ld2410YamlPath)) {
+    throw "LD2410 YAML config was not found at $ld2410YamlPath"
+  }
+  Push-Location $repoRoot
+  try {
+    Invoke-ESPHome compile $ld2410YamlPath
+    if ($LASTEXITCODE -ne 0) {
+      throw "LD2410 firmware compile failed"
+    }
+  } finally {
+    Pop-Location
+  }
+
+  foreach ($candidateDir in $ld2410BuildDirs) {
+    $candidateOtaBin = Join-Path $candidateDir "firmware.ota.bin"
+    $candidateFactoryBin = Join-Path $candidateDir "firmware.factory.bin"
+    if ((Test-Path $candidateOtaBin) -and (Test-Path $candidateFactoryBin)) {
+      $ld2410SourceOtaBin = $candidateOtaBin
+      $ld2410SourceFactoryBin = $candidateFactoryBin
+      break
+    }
+  }
+}
+
 if (-not $sourceOtaBin -or -not (Test-Path $sourceOtaBin)) {
   throw "OTA firmware not found after compile"
 }
@@ -246,12 +297,20 @@ if (-not $fphSourceOtaBin -or -not (Test-Path $fphSourceOtaBin)) {
 if (-not $fphSourceFactoryBin -or -not (Test-Path $fphSourceFactoryBin)) {
   throw "FPH factory firmware not found after compile"
 }
+if (-not $ld2410SourceOtaBin -or -not (Test-Path $ld2410SourceOtaBin)) {
+  throw "LD2410 OTA firmware not found after compile"
+}
+if (-not $ld2410SourceFactoryBin -or -not (Test-Path $ld2410SourceFactoryBin)) {
+  throw "LD2410 factory firmware not found after compile"
+}
 
 & powershell -NoProfile -ExecutionPolicy Bypass -File $verifyFirmwareBinsScript -BinPaths @(
   $sourceOtaBin,
   $sourceFactoryBin,
   $fphSourceOtaBin,
-  $fphSourceFactoryBin
+  $fphSourceFactoryBin,
+  $ld2410SourceOtaBin,
+  $ld2410SourceFactoryBin
 )
 if ($LASTEXITCODE -ne 0) {
   throw "Firmware binary verification failed"
@@ -264,6 +323,8 @@ $releaseOtaBin = Join-Path $releaseDir ("hubvoice-sat-" + $version + "-ota.bin")
 $releaseFactoryBin = Join-Path $releaseDir ("hubvoice-sat-" + $version + "-factory.bin")
 $releaseFphOtaBin = Join-Path $releaseDir ("hubvoice-sat-fph-" + $fphVersion + "-ota.bin")
 $releaseFphFactoryBin = Join-Path $releaseDir ("hubvoice-sat-fph-" + $fphVersion + "-factory.bin")
+$releaseLd2410OtaBin = Join-Path $releaseDir ("hubvoice-sat-fph-ld2410-" + $ld2410Version + "-ota.bin")
+$releaseLd2410FactoryBin = Join-Path $releaseDir ("hubvoice-sat-fph-ld2410-" + $ld2410Version + "-factory.bin")
 $releaseSetupExe = Join-Path $releaseDir "HubVoiceSatSetup.exe"
 $releaseMainExe = Join-Path $releaseDir "HubVoiceSat.exe"
 $releaseRuntimeExe = Join-Path $releaseDir "HubVoiceRuntime.exe"
@@ -288,6 +349,8 @@ Copy-Item $sourceOtaBin $releaseOtaBin -Force
 Copy-Item $sourceFactoryBin $releaseFactoryBin -Force
 Copy-Item $fphSourceOtaBin $releaseFphOtaBin -Force
 Copy-Item $fphSourceFactoryBin $releaseFphFactoryBin -Force
+Copy-Item $ld2410SourceOtaBin $releaseLd2410OtaBin -Force
+Copy-Item $ld2410SourceFactoryBin $releaseLd2410FactoryBin -Force
 
 if (-not (Test-Path $setupProject)) {
   throw "Setup launcher project was not found at $setupProject"
@@ -340,6 +403,8 @@ $now = Get-Date
 (Get-Item $releaseFactoryBin).LastWriteTime = $now
 (Get-Item $releaseFphOtaBin).LastWriteTime = $now
 (Get-Item $releaseFphFactoryBin).LastWriteTime = $now
+(Get-Item $releaseLd2410OtaBin).LastWriteTime = $now
+(Get-Item $releaseLd2410FactoryBin).LastWriteTime = $now
 (Get-Item $releaseSetupExe).LastWriteTime = $now
 (Get-Item $releaseMainExe).LastWriteTime = $now
 (Get-Item $releaseRuntimeExe).LastWriteTime = $now
@@ -359,6 +424,8 @@ Files in this folder:
 - $(Split-Path $releaseOtaBin -Leaf)        OTA update for HA Voice PE (default model)
 - $(Split-Path $releaseFphFactoryBin -Leaf) First USB install for FPH Satellite-1
 - $(Split-Path $releaseFphOtaBin -Leaf)     OTA update for FPH Satellite-1
+- $(Split-Path $releaseLd2410FactoryBin -Leaf) First USB install for FPH Satellite-1 LD2410
+- $(Split-Path $releaseLd2410OtaBin -Leaf)     OTA update for FPH Satellite-1 LD2410
 - open-usb-flash-page.bat      Opens ESP Web Tools for USB flashing
 - open-usb-wifi-setup-page.bat Opens serial Wi-Fi provisioning page (USB)
 - open-upload-page.bat         Opens satellite web page for OTA updates
@@ -372,6 +439,8 @@ Step 1 â€” Flash the satellite (one time per device):
       $(Split-Path $releaseFactoryBin -Leaf) (HA Voice PE)
       OR
       $(Split-Path $releaseFphFactoryBin -Leaf) (FPH Satellite-1)
+      OR
+      $(Split-Path $releaseLd2410FactoryBin -Leaf) (FPH Satellite-1 LD2410)
   d. For HA Voice PE USB onboarding (recommended):
       - After flashing, click the menu (three dots) on the device card.
       - Choose Configure Wi-Fi and enter your home Wi-Fi credentials.
@@ -402,6 +471,7 @@ OTA UPDATE (later firmware updates)
 4. Select the OTA file matching your hardware:
      - $(Split-Path $releaseOtaBin -Leaf) (HA Voice PE)
      - $(Split-Path $releaseFphOtaBin -Leaf) (FPH Satellite-1)
+     - $(Split-Path $releaseLd2410OtaBin -Leaf) (FPH Satellite-1 LD2410)
    Then upload it.
 5. Wait for the satellite to reboot.
 
@@ -415,7 +485,9 @@ $checksums = @(
   (Get-FileHash $releaseFactoryBin -Algorithm SHA256),
   (Get-FileHash $releaseOtaBin -Algorithm SHA256),
   (Get-FileHash $releaseFphFactoryBin -Algorithm SHA256),
-  (Get-FileHash $releaseFphOtaBin -Algorithm SHA256)
+  (Get-FileHash $releaseFphOtaBin -Algorithm SHA256),
+  (Get-FileHash $releaseLd2410FactoryBin -Algorithm SHA256),
+  (Get-FileHash $releaseLd2410OtaBin -Algorithm SHA256)
 ) | ForEach-Object { "{0} *{1}" -f $_.Hash, (Split-Path $_.Path -Leaf) }
 Set-Content -Path $checksumsPath -Value $checksums -Encoding ASCII
 

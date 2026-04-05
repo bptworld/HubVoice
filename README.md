@@ -26,6 +26,7 @@ Key capabilities:
 - Updates after first install should use OTA firmware from the satellite web UI.
 - Release packaging checks for accidental secret leakage in binaries.
 - Keep local Wi-Fi credentials out of distributable release artifacts.
+- Fully compiled versions are available at https://www.dropbox.com/home/HubVoice.
 
 ## Firmware Variants
 
@@ -40,25 +41,26 @@ The OTA release script can package multiple variants into one release folder.
 ## Quick Start (Windows)
 
 1. Clone this repository and open PowerShell in the repo root.
-2. Configure and compile firmware:
+2. If you prefer prebuilt artifacts, download fully compiled versions from https://www.dropbox.com/home/HubVoice.
+3. Configure and compile firmware:
 
 ```powershell
 .\build-hubvoice-sat.ps1 -Action config
 .\build-hubvoice-sat.ps1 -Action compile
 ```
 
-3. For a first-time satellite flash, use a factory image via USB:
+4. For a first-time satellite flash, use a factory image via USB:
 - Open https://web.esphome.io/
 - Connect device
 - Install matching factory bin
 
-4. For ongoing updates, generate and use OTA release assets:
+5. For ongoing updates, generate and use OTA release assets:
 
 ```powershell
 .\build-ota-release.ps1
 ```
 
-5. Launch the Windows setup runtime UI if needed:
+6. Launch the Windows setup runtime UI if needed:
 
 ```powershell
 .\HubVoiceSatSetup.exe

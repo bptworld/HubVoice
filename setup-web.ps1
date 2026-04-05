@@ -875,7 +875,7 @@ function Get-SatelliteStatus {
     $webPort = if ($web8080) { 8080 } elseif ($web80) { 80 } else { $null }
     $pingOk = $webOk
     $satFirmware = if ($webOk -and $webPort) { Get-SatelliteFirmwareVersion -ip $ip -port $webPort } else { $null }
-    $targetFirmware = if ($name -like "*atom*" -or $name -like "*echos3r*") { $echos3rFirmware } else { $defaultFirmware }
+    $targetFirmware = if ($name -like "*echos3r*") { $echos3rFirmware } else { $defaultFirmware }
     $comparison = Compare-Version $satFirmware $targetFirmware
     $updateStatus = if (-not $satFirmware) {
       "unknown"

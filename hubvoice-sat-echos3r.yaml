@@ -81,7 +81,7 @@ esphome:
       - component.update: firmware_version_text
 
 esp32:
-  # M5Stack Atom EchoS3R: ESP32-S3-PICO-1-N8R8 (8MB flash, 8MB octal PSRAM)
+  # M5Stack EchoS3R: ESP32-S3-PICO-1-N8R8 (8MB flash, 8MB octal PSRAM)
   variant: esp32s3
   flash_size: 8MB
   cpu_frequency: 240MHz
@@ -347,7 +347,7 @@ switch:
             .perform();
       - script.execute: control_leds
 
-  # Software-only mute (no hardware mute switch on Atom EchoS3R)
+  # Software-only mute (no hardware mute switch on EchoS3R)
   - platform: template
     id: master_mute_switch
     restore_mode: RESTORE_DEFAULT_OFF
@@ -405,7 +405,7 @@ switch:
       - delay: 15min
       - switch.turn_off: timer_ringing
 
-  # Speaker amplifier enable (GPIO18 on Atom EchoS3R)
+  # Speaker amplifier enable (GPIO18 on EchoS3R)
   - platform: gpio
     pin: GPIO18
     id: internal_speaker_amp
@@ -415,7 +415,7 @@ switch:
     internal: true
 
 binary_sensor:
-  # Single button on GPIO41 (Atom EchoS3R)
+  # Single button on GPIO41 (EchoS3R)
   - platform: gpio
     id: center_button
     pin:
@@ -618,7 +618,7 @@ script:
           }
           id(stop).set_probability_cutoff(use_okay_nabu ? 143 : 160);
 
-  # No-op on Atom EchoS3R (no LED hardware supported)
+  # No-op on EchoS3R (no LED hardware supported)
   - id: control_leds
     then: []
 

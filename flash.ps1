@@ -26,7 +26,7 @@ $YamlMap = @{
 if (-not $Model) {
     Write-Host "Hardware model (leave blank for default HA Voice PE):"
     Write-Host "  [blank] = HA Voice PE (hubvoice-sat.yaml)"
-    Write-Host "  echos3r = M5Stack Atom EchoS3R (hubvoice-sat-echos3r.yaml)"
+    Write-Host "  echos3r = M5Stack EchoS3R (hubvoice-sat-echos3r.yaml)"
     Write-Host "  fph     = FPH Satellite-1 (hubvoice-sat-fph.yaml)"
     $Model = Read-Host "Model"
 }

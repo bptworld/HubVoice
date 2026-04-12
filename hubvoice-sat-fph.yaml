@@ -574,7 +574,7 @@ micro_wake_word:
   id: mww
   microphone:
     microphone: sat1_mics
-    channels: 1
+    channels: 0
     gain_factor: 6
   stop_after_detection: false
   models:

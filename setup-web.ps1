@@ -18,6 +18,8 @@ $satellitesPath = Join-Path $userDataDir "satellites.csv"
 $setupConfigPath = Join-Path $userDataDir "hubvoice-sat-setup.json"
 $piperVoicesPath = Join-Path $root "piper_voices"
 $yamlPath = Join-Path $root "hubvoice-sat.yaml"
+$sonosSpeakersPath = Join-Path $userDataDir "sonos-speakers.csv"
+$dlnaSpeakersPath = Join-Path $userDataDir "dlna-speakers.csv"
 $setupPort = 8093
 $setupSchemaVersion = "2"
 try {
@@ -234,84 +236,6 @@ function Test-PopulatedSatellitesText([string]$text) {
   return $false
 }
 
-function Get-LegacyStateRoots {
-  $roots = @($root)
-
-  $launcherPath = Get-LauncherPath
-  if ($launcherPath) {
-    $launcherDir = Split-Path -Parent $launcherPath
-    if ($launcherDir) {
-      $roots += $launcherDir
-    }
-  }
-
-  try {
-    $cwd = (Get-Location).Path
-    if ($cwd) {
-      $roots += $cwd
-    }
-  } catch {
-  }
-
-  $seen = @{}
-  $unique = @()
-  foreach ($candidate in $roots) {
-    if (-not $candidate) {
-      continue
-    }
-    try {
-      $resolved = [System.IO.Path]::GetFullPath($candidate)
-    } catch {
-      continue
-    }
-    $key = $resolved.ToLowerInvariant()
-    if ($seen.ContainsKey($key)) {
-      continue
-    }
-    $seen[$key] = $true
-    $unique += $resolved
-  }
-
-  return @($unique)
-}
-
-function Migrate-LegacyUserFiles {
-  if (-not (Test-Path $satellitesPath)) {
-    foreach ($legacyRoot in (Get-LegacyStateRoots)) {
-      $legacySatellitesPath = Join-Path $legacyRoot "satellites.csv"
-      if (-not (Test-Path $legacySatellitesPath)) {
-        continue
-      }
-      try {
-        $legacyText = Get-Content $legacySatellitesPath -Raw -Encoding UTF8
-        if (Test-PopulatedSatellitesText $legacyText) {
-          Set-Content -Path $satellitesPath -Value $legacyText -Encoding UTF8
-          break
-        }
-      } catch {
-      }
-    }
-  }
-
-  if (-not (Test-Path $setupConfigPath)) {
-    foreach ($legacyRoot in (Get-LegacyStateRoots)) {
-      $legacyConfigPath = Join-Path $legacyRoot "hubvoice-sat-setup.json"
-      if (-not (Test-Path $legacyConfigPath)) {
-        continue
-      }
-      try {
-        $legacyRaw = Get-Content $legacyConfigPath -Raw -Encoding UTF8
-        $legacyConfig = $legacyRaw | ConvertFrom-Json
-        if ($legacyConfig) {
-          Set-Content -Path $setupConfigPath -Value $legacyRaw -Encoding UTF8
-          break
-        }
-      } catch {
-      }
-    }
-  }
-}
-
 function Get-SecretsState {
   $state = @{
     wifi_ssid = ""
@@ -372,7 +296,6 @@ function Save-SecretsState([hashtable]$payload) {
 }
 
 function Get-SatellitesText {
-  Migrate-LegacyUserFiles
   if (-not (Test-Path $satellitesPath)) {
     return ""
   }
@@ -460,8 +383,360 @@ function Save-SatellitesText([string]$text) {
   }
 }
 
+function Get-SonosText {
+  if (-not (Test-Path $sonosSpeakersPath)) {
+    return ""
+  }
+  return ((Get-Content $sonosSpeakersPath) -join "`r`n")
+}
+
+function Save-SonosText([string]$text) {
+  $rows = @()
+  foreach ($rawLine in ($text -split "`r?`n")) {
+    $line = $rawLine.Trim()
+    if (-not $line) {
+      continue
+    }
+    if ($line -notmatch ',') {
+      throw "Each Sonos speaker line must be in the format name,ip[,alias]"
+    }
+    $parts = $line.Split(",", 3)
+    $name = $parts[0].Trim()
+    $ip = $parts[1].Trim()
+    $alias = if ($parts.Count -ge 3) { $parts[2].Trim() } else { "" }
+
+    if (-not $name -or -not $ip) {
+      throw "Each Sonos speaker line must include both name and ip"
+    }
+
+    if ($alias) {
+      $rows += "$name,$ip,$alias"
+    } else {
+      $rows += "$name,$ip"
+    }
+  }
+
+  if ($rows.Count -eq 0) {
+    if (Test-Path $sonosSpeakersPath) {
+      Remove-Item $sonosSpeakersPath -Force
+    }
+  } else {
+    Set-Content -Path $sonosSpeakersPath -Value $rows -Encoding UTF8
+  }
+}
+
+function Get-DlnaText {
+  if (-not (Test-Path $dlnaSpeakersPath)) {
+    return ""
+  }
+  return ((Get-Content $dlnaSpeakersPath) -join "`r`n")
+}
+
+function Save-DlnaText([string]$text) {
+  $rows = @()
+  foreach ($rawLine in ($text -split "`r?`n")) {
+    $line = $rawLine.Trim()
+    if (-not $line) {
+      continue
+    }
+    if ($line -notmatch ',') {
+      throw "Each DLNA/UPnP speaker line must be in the format name,ip[,alias]"
+    }
+    $parts = $line.Split(",", 3)
+    $name = $parts[0].Trim()
+    $ip = $parts[1].Trim()
+    $alias = if ($parts.Count -ge 3) { $parts[2].Trim() } else { "" }
+
+    if (-not $name -or -not $ip) {
+      throw "Each DLNA/UPnP speaker line must include both name and ip"
+    }
+
+    if ($alias) {
+      $rows += "$name,$ip,$alias"
+    } else {
+      $rows += "$name,$ip"
+    }
+  }
+
+  if ($rows.Count -eq 0) {
+    if (Test-Path $dlnaSpeakersPath) {
+      Remove-Item $dlnaSpeakersPath -Force
+    }
+  } else {
+    Set-Content -Path $dlnaSpeakersPath -Value $rows -Encoding UTF8
+  }
+}
+
+function Convert-SpeakerTextToRows([string]$text) {
+  $items = @()
+  foreach ($rawLine in ($text -split "`r?`n")) {
+    $line = $rawLine.Trim()
+    if (-not $line -or $line -notmatch ',') {
+      continue
+    }
+    $parts = $line.Split(",", 3)
+    if ($parts.Count -lt 2) {
+      continue
+    }
+    $name = $parts[0].Trim()
+    $ip = $parts[1].Trim()
+    $alias = if ($parts.Count -ge 3) { $parts[2].Trim() } else { "" }
+    if (-not $name -or -not $ip) {
+      continue
+    }
+    $items += @{ name = $name; ip = $ip; alias = $alias }
+  }
+  return @($items)
+}
+
+function Get-DlnaFriendlyNameFromLocation([string]$location) {
+  if (-not $location) {
+    return $null
+  }
+  try {
+    $response = Invoke-WebRequest -UseBasicParsing -Uri $location -Method GET -TimeoutSec 2
+    $content = [string]$response.Content
+    if ($content -match '<friendlyName>\s*([^<]+)\s*</friendlyName>') {
+      return ([string]$matches[1]).Trim()
+    }
+  } catch {
+  }
+  return $null
+}
+
+function Discover-DlnaSpeakers([int]$timeoutMs = 2500) {
+  $results = New-Object System.Collections.Generic.List[hashtable]
+  $seenIps = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+  $client = $null
+
+  try {
+    $client = New-Object System.Net.Sockets.UdpClient
+    $client.EnableBroadcast = $true
+    $client.MulticastLoopback = $false
+    $client.Client.ReceiveTimeout = 400
+
+    $search = (
+      "M-SEARCH * HTTP/1.1`r`n" +
+      "HOST: 239.255.255.250:1900`r`n" +
+      "MAN: ""ssdp:discover""`r`n" +
+      "MX: 2`r`n" +
+      "ST: urn:schemas-upnp-org:device:MediaRenderer:1`r`n`r`n"
+    )
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes($search)
+    $endpoint = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Parse("239.255.255.250"), 1900)
+    1..2 | ForEach-Object { [void]$client.Send($bytes, $bytes.Length, $endpoint) }
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds([Math]::Max(500, $timeoutMs))
+    while ([DateTime]::UtcNow -lt $deadline) {
+      try {
+        $remote = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+        $packet = $client.Receive([ref]$remote)
+        if (-not $packet) { continue }
+        $text = [System.Text.Encoding]::ASCII.GetString($packet)
+        $location = ""
+        foreach ($line in ($text -split "`r?`n")) {
+          if ($line -match '^(?i)LOCATION:\s*(.+)$') {
+            $location = $matches[1].Trim()
+            break
+          }
+        }
+
+        $ip = ""
+        try {
+          if ($location) {
+            $ip = ([Uri]$location).Host
+          }
+        } catch {
+        }
+        if (-not $ip) {
+          $ip = [string]$remote.Address
+        }
+        if (-not $ip -or -not $seenIps.Add($ip)) {
+          continue
+        }
+
+        $friendly = Get-DlnaFriendlyNameFromLocation $location
+        if (-not $friendly) {
+          $friendly = "DLNA-$($ip -replace '\\.', '-')"
+        }
+        $id = ($friendly -replace '[^A-Za-z0-9_-]+', '-').Trim('-')
+        if (-not $id) {
+          $id = "dlna-$($ip -replace '\\.', '-')"
+        }
+
+        $results.Add(@{
+          name = $id
+          ip = $ip
+          alias = $friendly
+        }) | Out-Null
+      } catch [System.Management.Automation.MethodInvocationException] {
+        continue
+      } catch {
+        continue
+      }
+    }
+  } catch {
+  } finally {
+    if ($client) {
+      try { $client.Close() } catch {}
+    }
+  }
+
+  return @($results)
+}
+
+function Add-DiscoveredDlnaSpeakers([hashtable[]]$discovered) {
+  $existingRows = @(Convert-SpeakerTextToRows (Get-DlnaText))
+  $rowsByIp = @{}
+  $rowsByName = @{}
+  foreach ($row in $existingRows) {
+    $rowsByIp[[string]$row.ip] = $row
+    $rowsByName[[string]$row.name] = $row
+  }
+
+  $added = 0
+  foreach ($item in @($discovered)) {
+    $name = [string]$item.name
+    $ip = [string]$item.ip
+    $alias = [string]$item.alias
+    if (-not $name -or -not $ip) { continue }
+    if ($rowsByIp.ContainsKey($ip) -or $rowsByName.ContainsKey($name)) { continue }
+    $row = @{ name = $name; ip = $ip; alias = $alias }
+    $existingRows += $row
+    $rowsByIp[$ip] = $row
+    $rowsByName[$name] = $row
+    $added++
+  }
+
+  $lines = @()
+  foreach ($row in $existingRows) {
+    if ([string]::IsNullOrWhiteSpace([string]$row.alias)) {
+      $lines += "{0},{1}" -f $row.name, $row.ip
+    } else {
+      $lines += "{0},{1},{2}" -f $row.name, $row.ip, $row.alias
+    }
+  }
+  Save-DlnaText ($lines -join "`r`n")
+  return $added
+}
+
+function Discover-SonosSpeakers([int]$timeoutMs = 2500) {
+  $results = New-Object System.Collections.Generic.List[hashtable]
+  $seenIps = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+  $client = $null
+
+  try {
+    $client = New-Object System.Net.Sockets.UdpClient
+    $client.EnableBroadcast = $true
+    $client.MulticastLoopback = $false
+    $client.Client.ReceiveTimeout = 400
+
+    $search = (
+      "M-SEARCH * HTTP/1.1`r`n" +
+      "HOST: 239.255.255.250:1900`r`n" +
+      "MAN: ""ssdp:discover""`r`n" +
+      "MX: 2`r`n" +
+      "ST: urn:schemas-upnp-org:device:ZonePlayer:1`r`n`r`n"
+    )
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes($search)
+    $endpoint = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Parse("239.255.255.250"), 1900)
+    1..2 | ForEach-Object { [void]$client.Send($bytes, $bytes.Length, $endpoint) }
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds([Math]::Max(500, $timeoutMs))
+    while ([DateTime]::UtcNow -lt $deadline) {
+      try {
+        $remote = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+        $packet = $client.Receive([ref]$remote)
+        if (-not $packet) { continue }
+        $text = [System.Text.Encoding]::ASCII.GetString($packet)
+        $location = ""
+        foreach ($line in ($text -split "`r?`n")) {
+          if ($line -match '^(?i)LOCATION:\s*(.+)$') {
+            $location = $matches[1].Trim()
+            break
+          }
+        }
+
+        $ip = ""
+        try {
+          if ($location) {
+            $ip = ([Uri]$location).Host
+          }
+        } catch {
+        }
+        if (-not $ip) {
+          $ip = [string]$remote.Address
+        }
+        if (-not $ip -or -not $seenIps.Add($ip)) {
+          continue
+        }
+
+        $friendly = Get-DlnaFriendlyNameFromLocation $location
+        if (-not $friendly) {
+          $friendly = "Sonos-$($ip -replace '\\.', '-')"
+        }
+        $id = ($friendly -replace '[^A-Za-z0-9_-]+', '-').Trim('-')
+        if (-not $id) {
+          $id = "sonos-$($ip -replace '\\.', '-')"
+        }
+
+        $results.Add(@{
+          name = $id
+          ip = $ip
+          alias = $friendly
+        }) | Out-Null
+      } catch [System.Management.Automation.MethodInvocationException] {
+        continue
+      } catch {
+        continue
+      }
+    }
+  } catch {
+  } finally {
+    if ($client) {
+      try { $client.Close() } catch {}
+    }
+  }
+
+  return @($results)
+}
+
+function Add-DiscoveredSonosSpeakers([hashtable[]]$discovered) {
+  $existingRows = @(Convert-SpeakerTextToRows (Get-SonosText))
+  $rowsByIp = @{}
+  $rowsByName = @{}
+  foreach ($row in $existingRows) {
+    $rowsByIp[[string]$row.ip] = $row
+    $rowsByName[[string]$row.name] = $row
+  }
+
+  $added = 0
+  foreach ($item in @($discovered)) {
+    $name = [string]$item.name
+    $ip = [string]$item.ip
+    $alias = [string]$item.alias
+    if (-not $name -or -not $ip) { continue }
+    if ($rowsByIp.ContainsKey($ip) -or $rowsByName.ContainsKey($name)) { continue }
+    $row = @{ name = $name; ip = $ip; alias = $alias }
+    $existingRows += $row
+    $rowsByIp[$ip] = $row
+    $rowsByName[$name] = $row
+    $added++
+  }
+
+  $lines = @()
+  foreach ($row in $existingRows) {
+    if ([string]::IsNullOrWhiteSpace([string]$row.alias)) {
+      $lines += "{0},{1}" -f $row.name, $row.ip
+    } else {
+      $lines += "{0},{1},{2}" -f $row.name, $row.ip, $row.alias
+    }
+  }
+  Save-SonosText ($lines -join "`r`n")
+  return $added
+}
+
 function Get-SetupConfig {
-  Migrate-LegacyUserFiles
   $default = @{
     hubvoice_url = ""
     hubitat_host = ""
@@ -528,6 +803,8 @@ function Get-State {
     wifi_ssid_saved = [bool]$secrets.wifi_ssid_saved
     wifi_password_saved = [bool]$secrets.wifi_password_saved
     satellites_text = Get-SatellitesText
+    sonos_speakers_text = Get-SonosText
+    dlna_speakers_text = Get-DlnaText
     hubvoice_url = $config.hubvoice_url
     hubitat_host = $config.hubitat_host
     hubitat_app_id = $config.hubitat_app_id
@@ -537,9 +814,289 @@ function Get-State {
     piper_voice_model = $config.piper_voice_model
     piper_voice_models = @(Get-PiperVoiceOptions)
     launcher_version = Get-LauncherVersion
+    launcher_path = Get-LauncherPath
+    runtime_state_dir = $userDataDir
+    runtime_satellites_path = $satellitesPath
+    runtime_sonos_speakers_path = $sonosSpeakersPath
+    runtime_dlna_speakers_path = $dlnaSpeakersPath
+    runtime_config_path = $setupConfigPath
     setup_schema_version = $setupSchemaVersion
     firmware_target_version = [string](Get-YamlValue -Path $yamlPath -Key "firmware_version")
   }
+}
+
+function Get-ProcessSnapshots {
+  param(
+    [string[]]$Names = @()
+  )
+
+  $items = @()
+
+  $onWindows = (($env:OS -eq "Windows_NT") -or ((Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) -and $IsWindows))
+
+  if ($onWindows) {
+    try {
+      $filter = $null
+      if ($Names -and $Names.Count -gt 0) {
+        $clauses = @($Names | ForEach-Object { "Name = '$_'" })
+        $filter = ($clauses -join ' OR ')
+      }
+
+      $processes = if ($filter) {
+        Get-CimInstance Win32_Process -Filter $filter -ErrorAction SilentlyContinue
+      } else {
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+      }
+
+      foreach ($proc in @($processes)) {
+        $items += @{
+          pid = [int]$proc.ProcessId
+          parent_pid = [int]$proc.ParentProcessId
+          name = [string]$proc.Name
+          path = [string]$proc.ExecutablePath
+          command_line = [string]$proc.CommandLine
+        }
+      }
+    } catch {
+    }
+
+    return @($items)
+  }
+
+  try {
+    $output = & ps -eo pid=,ppid=,comm=,args= 2>$null
+    foreach ($line in @($output)) {
+      $raw = [string]$line
+      if (-not $raw) { continue }
+      if ($raw -notmatch '^\s*(\d+)\s+(\d+)\s+(\S+)\s*(.*)$') { continue }
+
+      $name = [string]$matches[3]
+      if ($Names -and $Names.Count -gt 0 -and ($Names -notcontains $name)) {
+        continue
+      }
+
+      $items += @{
+        pid = [int]$matches[1]
+        parent_pid = [int]$matches[2]
+        name = $name
+        path = ""
+        command_line = [string]$matches[4]
+      }
+    }
+  } catch {
+  }
+
+  return @($items)
+}
+
+function Invoke-RuntimeJsonEndpoint {
+  param(
+    [string]$BaseUrl,
+    [string]$Path,
+    [int]$TimeoutSec = 3
+  )
+
+  $target = if ($BaseUrl) { $BaseUrl.TrimEnd('/') + $Path } else { "" }
+  if (-not $target) {
+    return @{ ok = $false; target = $target; error = "HubVoice URL is not configured." }
+  }
+
+  try {
+    $data = Invoke-RestMethod -Method GET -Uri $target -TimeoutSec $TimeoutSec
+    return @{ ok = $true; target = $target; data = $data }
+  } catch {
+    return @{ ok = $false; target = $target; error = $_.Exception.Message }
+  }
+}
+
+function Get-SetupWebProcessSnapshot {
+  $items = @()
+  try {
+    $processes = @(Get-ProcessSnapshots -Names @('powershell.exe', 'pwsh.exe', 'pwsh'))
+    foreach ($proc in $processes) {
+      $cmd = [string]$proc.command_line
+      if (-not $cmd) { continue }
+
+      $isSetupWeb = $false
+      if ($cmd -match 'setup-web\.ps1') {
+        $isSetupWeb = $true
+      } elseif ($cmd -match '-File\s+"?([^"\s]+\.ps1)"?') {
+        $wrapperPath = $Matches[1]
+        if (Test-Path $wrapperPath) {
+          try {
+            $wrapperText = Get-Content -Path $wrapperPath -Raw -ErrorAction Stop
+            if ($wrapperText -match 'setup-web\.ps1' -or $wrapperText -match 'HUBVOICESAT_SETUP_PORT') {
+              $isSetupWeb = $true
+            }
+          } catch {
+          }
+        }
+      }
+
+      if (-not $isSetupWeb) { continue }
+
+      $items += @{
+        pid = [int]$proc.pid
+        parent_pid = [int]$proc.parent_pid
+        name = [string]$proc.name
+        command_line = $cmd
+      }
+    }
+  } catch {
+  }
+
+  return @($items)
+}
+
+function Get-DebugSnapshot {
+  $state = Get-State
+  $status = Get-StatusSnapshot
+  $hubvoiceUrl = [string]$state.hubvoice_url
+  $runtimeHealth = Invoke-RuntimeJsonEndpoint -BaseUrl $hubvoiceUrl -Path "/health" -TimeoutSec 3
+  $runtimeSatellites = Invoke-RuntimeJsonEndpoint -BaseUrl $hubvoiceUrl -Path "/satellites" -TimeoutSec 3
+
+  $runtimeExe = @()
+  $launcherExe = @()
+
+  try {
+    $runtimeCandidates = @(Get-ProcessSnapshots -Names @('HubVoiceRuntime.exe', 'python.exe', 'python3', 'python3.exe', 'py.exe'))
+    $runtimeExe = @($runtimeCandidates | Where-Object {
+      $name = [string]$_.name
+      $cmd = [string]$_.command_line
+      if ($name -ieq 'HubVoiceRuntime.exe') { return $true }
+      return ($cmd -match 'hubvoice-runtime\.py')
+    } | ForEach-Object {
+      @{
+        pid = [int]$_.pid
+        parent_pid = [int]$_.parent_pid
+        name = [string]$_.name
+        path = [string]$_.path
+        command_line = [string]$_.command_line
+      }
+    })
+  } catch {
+  }
+
+  try {
+    $launcherExe = @(Get-ProcessSnapshots -Names @('HubVoiceSat.exe', 'HubVoiceSatSetup.exe') | ForEach-Object {
+      @{
+        pid = [int]$_.pid
+        parent_pid = [int]$_.parent_pid
+        name = [string]$_.name
+        path = [string]$_.path
+      }
+    })
+  } catch {
+  }
+
+  return @{
+    generated_at = (Get-Date).ToString("o")
+    setup_url = $url
+    setup_root = $root
+    setup_schema_version = $setupSchemaVersion
+    setup_page_path = $setupPagePath
+    debug_page_path = $debugPagePath
+    state = $state
+    status = $status
+    runtime_health = $runtimeHealth
+    runtime_satellites = $runtimeSatellites
+    processes = @{
+      setup_web = @(Get-SetupWebProcessSnapshot)
+      runtime_exe = $runtimeExe
+      launcher_exe = $launcherExe
+    }
+  }
+}
+
+function Sanitize-DiagnosticText([string]$text) {
+  if (-not $text) { return "" }
+
+  $sanitized = [string]$text
+  # Hide common secret-bearing query string parameters.
+  $sanitized = [regex]::Replace($sanitized, '(?i)(access_token=)[^&\s"]+', '$1<redacted>')
+  $sanitized = [regex]::Replace($sanitized, '(?i)(token=)[^&\s"]+', '$1<redacted>')
+
+  # Hide simple key/value secret lines that may appear in logs or JSON snippets.
+  $sanitized = [regex]::Replace($sanitized, '(?im)("?(wifi_password|hubitat_access_token|access_token|token|api_key|password)"?\s*[:=]\s*")([^"]*)(")', '$1<redacted>$4')
+  $sanitized = [regex]::Replace($sanitized, '(?im)("?(wifi_password|hubitat_access_token|access_token|token|api_key|password)"?\s*[:=]\s*)([^\r\n,;\s]+)', '$1<redacted>')
+
+  return $sanitized
+}
+
+function Get-LogTail {
+  param(
+    [string]$Path,
+    [int]$MaxLines = 220,
+    [int]$MaxChars = 120000
+  )
+
+  if (-not $Path) {
+    return @{ ok = $false; path = $Path; error = "Path not provided" }
+  }
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    return @{ ok = $false; path = $Path; error = "File not found" }
+  }
+
+  try {
+    $lines = @(Get-Content -LiteralPath $Path -Tail $MaxLines -ErrorAction Stop)
+    $text = ($lines -join "`n")
+    if ($text.Length -gt $MaxChars) {
+      $text = $text.Substring($text.Length - $MaxChars)
+    }
+    return @{
+      ok = $true
+      path = $Path
+      line_count = $lines.Count
+      content = (Sanitize-DiagnosticText $text)
+    }
+  } catch {
+    return @{ ok = $false; path = $Path; error = $_.Exception.Message }
+  }
+}
+
+function Get-SupportBundle {
+  $debug = Get-DebugSnapshot
+  $state = $debug.state
+  $status = $debug.status
+  $runtimeHealth = $debug.runtime_health
+  $runtimeSatellites = $debug.runtime_satellites
+
+  $runtimeLog = Join-Path (Join-Path $userDataDir "logs") "hubvoice-runtime.log"
+  $runtimeErrLog = Join-Path (Join-Path $userDataDir "logs") "hubvoice-runtime-err.log"
+  $legacyRuntimeLog = Join-Path (Join-Path $root "logs") "hubvoice-runtime.log"
+  $legacyRuntimeErrLog = Join-Path (Join-Path $root "logs") "hubvoice-runtime-err.log"
+
+  $bundle = @{
+    bundle_version = "1"
+    generated_at = (Get-Date).ToString("o")
+    host = $env:COMPUTERNAME
+    setup_url = $url
+    setup_root = $root
+    runtime_state_dir = $state.runtime_state_dir
+    setup_schema_version = $setupSchemaVersion
+    setup = @{
+      state = $state
+      status = $status
+      processes = $debug.processes
+    }
+    runtime = @{
+      health = $runtimeHealth
+      satellites = $runtimeSatellites
+    }
+    log_tails = @{
+      runtime_log = Get-LogTail -Path $runtimeLog
+      runtime_err_log = Get-LogTail -Path $runtimeErrLog
+      legacy_runtime_log = Get-LogTail -Path $legacyRuntimeLog
+      legacy_runtime_err_log = Get-LogTail -Path $legacyRuntimeErrLog
+    }
+    notes = @(
+      "Secrets are redacted where recognized.",
+      "Share this bundle when reporting setup/runtime issues."
+    )
+  }
+
+  return $bundle
 }
 
 function Test-HttpUrl([string]$urlToCheck, [int]$timeoutSec = 1) {
@@ -948,6 +1505,26 @@ function Get-StatusSnapshot {
     }
     hubitat_health = $hubitatHttp
     satellites = @(Get-SatelliteStatus)
+    sonos_speakers = @(Convert-SpeakerTextToRows (Get-SonosText) | ForEach-Object {
+      $speakerIp = [string]$_.ip
+      @{
+        name = [string]$_.name
+        ip = $speakerIp
+        alias = [string]$_.alias
+        ping = [bool](Test-TcpPort $speakerIp 1400 500)
+        web_port = 1400
+      }
+    })
+    dlna_speakers = @(Convert-SpeakerTextToRows (Get-DlnaText) | ForEach-Object {
+      $speakerIp = [string]$_.ip
+      @{
+        name = [string]$_.name
+        ip = $speakerIp
+        alias = [string]$_.alias
+        ping = [bool](Test-TcpPort $speakerIp 80 500)
+        web_port = 80
+      }
+    })
   }
 }
 
@@ -1025,6 +1602,16 @@ function Write-TextResponse($context, [int]$statusCode, [string]$contentType, [s
 $setupPagePath = Join-Path $root "_live_setup_page.html"
 if (-not (Test-Path $setupPagePath)) {
   throw "Setup page source not found at $setupPagePath"
+}
+
+$speakersPagePath = Join-Path $root "_live_speakers_page.html"
+if (-not (Test-Path $speakersPagePath)) {
+  throw "Speakers page source not found at $speakersPagePath"
+}
+
+$debugPagePath = Join-Path $root "_live_setup_debug_page.html"
+if (-not (Test-Path $debugPagePath)) {
+  throw "Debug page source not found at $debugPagePath"
 }
 
 $html = Get-Content -Path $setupPagePath -Raw -Encoding UTF8
@@ -1150,6 +1737,26 @@ while ($listener.IsListening) {
       continue
     }
 
+    if ($path -eq "/speakers") {
+      try {
+        $speakersHtml = Get-Content -Path $speakersPagePath -Raw -Encoding UTF8
+      } catch {
+        $speakersHtml = ""
+      }
+      Write-TextResponse $context 200 "text/html; charset=utf-8" $speakersHtml
+      continue
+    }
+
+    if ($path -eq "/debug") {
+      try {
+        $debugHtml = Get-Content -Path $debugPagePath -Raw -Encoding UTF8
+      } catch {
+        $debugHtml = ""
+      }
+      Write-TextResponse $context 200 "text/html; charset=utf-8" $debugHtml
+      continue
+    }
+
     if ($path -eq "/favicon.ico") {
       $context.Response.StatusCode = 204
       $context.Response.OutputStream.Close()
@@ -1183,6 +1790,25 @@ while ($listener.IsListening) {
 
     if ($path -eq "/api/status" -and $method -eq "GET") {
       Write-JsonResponse $context 200 (Get-StatusSnapshot)
+      continue
+    }
+
+    if ($path -eq "/api/debug_snapshot" -and $method -eq "GET") {
+      Write-JsonResponse $context 200 (Get-DebugSnapshot)
+      continue
+    }
+
+    if ($path -eq "/api/support_bundle" -and $method -eq "GET") {
+      Write-JsonResponse $context 200 (Get-SupportBundle)
+      continue
+    }
+
+    if ($path -eq "/api/speakers/state" -and $method -eq "GET") {
+      Write-JsonResponse $context 200 @{
+        ok = $true
+        sonos_speakers_text = Get-SonosText
+        dlna_speakers_text = Get-DlnaText
+      }
       continue
     }
 
@@ -1238,6 +1864,44 @@ while ($listener.IsListening) {
       Write-JsonResponse $context 200 @{
         ok = $true
         message = "Opened $releasePath"
+      }
+      continue
+    }
+
+    if ($path -eq "/api/speakers/save" -and $method -eq "POST") {
+      $reader = New-Object System.IO.StreamReader($context.Request.InputStream, $context.Request.ContentEncoding)
+      $body = $reader.ReadToEnd()
+      $reader.Dispose()
+      $payloadObject = $body | ConvertFrom-Json
+      Save-SonosText ([string]$payloadObject.sonos_speakers_text)
+      Save-DlnaText ([string]$payloadObject.dlna_speakers_text)
+      Write-JsonResponse $context 200 @{
+        ok = $true
+        message = "Saved speaker targets."
+      }
+      continue
+    }
+
+    if ($path -eq "/api/speakers/discover_dlna" -and $method -eq "POST") {
+      $discovered = @(Discover-DlnaSpeakers)
+      $added = Add-DiscoveredDlnaSpeakers $discovered
+      Write-JsonResponse $context 200 @{
+        ok = $true
+        message = if ($added -gt 0) { "Discovered $added DLNA speaker(s)." } else { "No new DLNA speakers found." }
+        dlna_speakers_text = Get-DlnaText
+        discovered = $discovered
+      }
+      continue
+    }
+
+    if ($path -eq "/api/speakers/discover_sonos" -and $method -eq "POST") {
+      $discovered = @(Discover-SonosSpeakers)
+      $added = Add-DiscoveredSonosSpeakers $discovered
+      Write-JsonResponse $context 200 @{
+        ok = $true
+        message = if ($added -gt 0) { "Discovered $added Sonos speaker(s)." } else { "No new Sonos speakers found." }
+        sonos_speakers_text = Get-SonosText
+        discovered = $discovered
       }
       continue
     }

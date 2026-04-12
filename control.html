@@ -624,6 +624,7 @@
             <div class="note">Actions apply immediately, but may take a few seconds to kick in. Please be patient.</div>
             <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
                 <span id="global-status" class="status">Loading satellites...</span>
+                <button class="btn ghost" id="return-control-btn">Return to Control</button>
                 <button class="btn primary" id="refresh-btn">Refresh</button>
             </div>
         </div>
@@ -636,6 +637,14 @@
     <script>
         const HUB_MUSIC_TAB_ID = '__hubmusic__';
         const AIRPLAY_TAB_ID = '__airplay__';
+        const requestedInitialView = (() => {
+            try {
+                const value = new URLSearchParams(window.location.search).get('view');
+                return value === 'speaker' ? 'speaker' : 'hubmusic';
+            } catch {
+                return 'hubmusic';
+            }
+        })();
 
         const state = {
             satellites: [],
@@ -704,6 +713,8 @@
                 stereoLeft: '',
                 stereoRight: '',
                 stereoVolume: 50,
+                stereoPairName: '',
+                selectedStereoPairName: '',
                 excludeSatellite: '',
                 stabilityMode: 'max',
                 autoLaunch: true,
@@ -757,6 +768,13 @@
             }, 2600);
         }
 
+        function getPreferredInitialActiveTab() {
+            if (requestedInitialView === 'speaker') {
+                return state.satellites[0]?.id || '';
+            }
+            return HUB_MUSIC_TAB_ID;
+        }
+
         async function api(path, options = {}) {
             const response = await fetch(path, {
                 headers: { 'Content-Type': 'application/json' },
@@ -799,6 +817,10 @@
 
         function hiddenBuiltInRadioPresetsStorageKey() {
             return 'hubvoice:hidden_radio_presets';
+        }
+
+        function stereoPairsStorageKey() {
+            return 'hubvoice:stereo_pairs';
         }
 
         function encodeRadioOption(option) {
@@ -933,6 +955,69 @@
 
         function canDeleteRadioPreset(optionValue) {
             return !!parseRadioOption(optionValue).url;
+        }
+
+        function loadSavedStereoPairs() {
+            try {
+                const raw = window.localStorage.getItem(stereoPairsStorageKey());
+                if (!raw) return [];
+                const parsed = JSON.parse(raw);
+                if (!Array.isArray(parsed)) return [];
+                return parsed
+                    .map((item) => ({
+                        name: String(item?.name || '').trim(),
+                        left: String(item?.left || '').trim(),
+                        right: String(item?.right || '').trim(),
+                        volume: Math.max(0, Math.min(100, Number(item?.volume ?? 50))),
+                    }))
+                    .filter((item) => item.name && item.left && item.right && item.left !== item.right);
+            } catch {
+                return [];
+            }
+        }
+
+        function saveSavedStereoPairs(pairs) {
+            try {
+                window.localStorage.setItem(stereoPairsStorageKey(), JSON.stringify((pairs || []).slice(0, 30)));
+            } catch {
+                // Ignore storage errors.
+            }
+        }
+
+        function upsertSavedStereoPair(name, left, right, volume) {
+            const safeName = String(name || '').trim();
+            const safeLeft = String(left || '').trim();
+            const safeRight = String(right || '').trim();
+            const safeVolume = Math.max(0, Math.min(100, Number(volume ?? 50)));
+            if (!safeName || !safeLeft || !safeRight || safeLeft === safeRight) {
+                return false;
+            }
+            const pairs = loadSavedStereoPairs();
+            const key = safeName.toLowerCase();
+            const existingIdx = pairs.findIndex((item) => item.name.toLowerCase() === key);
+            const next = { name: safeName, left: safeLeft, right: safeRight, volume: safeVolume };
+            if (existingIdx >= 0) {
+                pairs.splice(existingIdx, 1);
+            }
+            pairs.unshift(next);
+            saveSavedStereoPairs(pairs);
+            return true;
+        }
+
+        function deleteSavedStereoPairByName(name) {
+            const safeName = String(name || '').trim().toLowerCase();
+            if (!safeName) return false;
+            const pairs = loadSavedStereoPairs();
+            const next = pairs.filter((item) => item.name.toLowerCase() !== safeName);
+            if (next.length === pairs.length) return false;
+            saveSavedStereoPairs(next);
+            return true;
+        }
+
+        function findSavedStereoPairByName(name) {
+            const safeName = String(name || '').trim().toLowerCase();
+            if (!safeName) return null;
+            return loadSavedStereoPairs().find((item) => item.name.toLowerCase() === safeName) || null;
         }
 
         function getDraft(id) {
@@ -1078,6 +1163,12 @@
             if (typeof draft.radioUrl !== 'string') {
                 draft.radioUrl = '';
             }
+            if (typeof draft.stereoPairName !== 'string') {
+                draft.stereoPairName = '';
+            }
+            if (typeof draft.selectedStereoPairName !== 'string') {
+                draft.selectedStereoPairName = '';
+            }
             return draft;
         }
 
@@ -1154,6 +1245,14 @@
             const draft = getHubMusicDraft();
             const reachable = state.hubMusic.reachable_satellites || [];
             const desktopAudio = state.hubMusic.desktop_audio || { available: false, devices: [], reason: '' };
+            const savedStereoPairs = loadSavedStereoPairs();
+            const matchedStereoPair = savedStereoPairs.find((pair) => (
+                draft.stereoLeft === pair.left
+                && draft.stereoRight === pair.right
+                && Number(draft.stereoVolume) === Number(pair.volume)
+            ));
+            const activeStereoPairName = String(draft.selectedStereoPairName || matchedStereoPair?.name || '').trim();
+            const isSavedPairSelected = !!String(draft.selectedStereoPairName || '').trim();
             const isActive = !!state.hubMusic.active;
             const statusClass = isActive ? 'good' : '';
             const statusText = isActive ? 'Playing' : 'Ready';
@@ -1262,6 +1361,11 @@
                     : (draft.selectedService !== 'radio' || hasRadioSource));
             const startDisabled = !canStart || !!state.hubMusicBusy;
             const stopDisabled = !isActive || !!state.hubMusicBusy;
+            const canSaveStereoPair = !!draft.stereoPairName.trim()
+                && !!draft.stereoLeft
+                && !!draft.stereoRight
+                && draft.stereoLeft !== draft.stereoRight;
+            const canDeleteStereoPair = !!draft.selectedStereoPairName && !!findSavedStereoPairByName(draft.selectedStereoPairName);
             const startLabel = draft.selectedService === 'dlna'
                 ? (state.hubMusic.dlna?.running ? '✓ Route Armed' : '▶ Arm Route')
                 : (draft.selectedService === 'airplay' ? '▶ Play AirPlay' : '▶ Start');
@@ -1298,7 +1402,12 @@
                             <h3>2. Play On</h3>
                             <div class="hubmusic-sat-grid">
                                 <button class="btn ${draft.mode === 'all_reachable' ? 'primary' : 'ghost'}" data-hubmusic-mode-btn="all_reachable">All Satellites <span class="chip">${reachable.length}</span></button>
-                                <button class="btn ${draft.mode === 'stereo_pair' ? 'primary' : 'ghost'}" data-hubmusic-mode-btn="stereo_pair">Stereo Pair</button>
+                                <button class="btn ${draft.mode === 'stereo_pair' && !isSavedPairSelected ? 'primary' : 'ghost'}" data-hubmusic-mode-btn="stereo_pair">Stereo Pair</button>
+                                ${savedStereoPairs.map((pair) => {
+                                    const selected = draft.mode === 'stereo_pair'
+                                        && String(draft.selectedStereoPairName || '').trim().toLowerCase() === pair.name.toLowerCase();
+                                    return `<button class="btn ${selected ? 'primary' : 'ghost'}" data-hubmusic-stereo-pair-select="${escapeHtml(pair.name)}" title="${escapeHtml('Left: ' + pair.left + ' | Right: ' + pair.right + ' | Volume: ' + pair.volume + '%')}">${escapeHtml(pair.name)}</button>`;
+                                }).join('')}
                                 ${state.satellites.map(sat => {
                                     const isSel = draft.mode === 'single' && draft.satellite === sat.id;
                                     const label = (sat.alias || sat.id) + (sat.reachable ? '' : ' (offline)');
@@ -1306,36 +1415,48 @@
                                 }).join('')}
                             </div>
                             ${draft.mode === 'stereo_pair' ? `
-                                <div class="control-row">
-                                    <label class="control-title"><span>Speaker Pairing</span><span>Choose left and right satellites</span></label>
-                                    <div class="mode-grid">
-                                        <select data-hubmusic-stereo-left>
-                                            ${state.satellites.map(sat => {
-                                                const selected = sat.id === draft.stereoLeft ? 'selected' : '';
-                                                const label = (sat.alias || sat.id) + (sat.reachable ? '' : ' (offline)');
-                                                return `<option value="${escapeHtml(sat.id)}" ${selected}>Left: ${escapeHtml(label)}</option>`;
-                                            }).join('')}
-                                        </select>
-                                        <select data-hubmusic-stereo-right>
-                                            ${state.satellites.map(sat => {
-                                                const selected = sat.id === draft.stereoRight ? 'selected' : '';
-                                                const label = (sat.alias || sat.id) + (sat.reachable ? '' : ' (offline)');
-                                                return `<option value="${escapeHtml(sat.id)}" ${selected}>Right: ${escapeHtml(label)}</option>`;
-                                            }).join('')}
-                                        </select>
+                                ${!isSavedPairSelected ? `
+                                    <div class="control-row">
+                                        <label class="control-title"><span>Speaker Pairing</span><span>Choose left and right satellites</span></label>
+                                        <div class="mode-grid">
+                                            <select data-hubmusic-stereo-left>
+                                                ${state.satellites.map(sat => {
+                                                    const selected = sat.id === draft.stereoLeft ? 'selected' : '';
+                                                    const label = (sat.alias || sat.id) + (sat.reachable ? '' : ' (offline)');
+                                                    return `<option value="${escapeHtml(sat.id)}" ${selected}>Left: ${escapeHtml(label)}</option>`;
+                                                }).join('')}
+                                            </select>
+                                            <select data-hubmusic-stereo-right>
+                                                ${state.satellites.map(sat => {
+                                                    const selected = sat.id === draft.stereoRight ? 'selected' : '';
+                                                    const label = (sat.alias || sat.id) + (sat.reachable ? '' : ' (offline)');
+                                                    return `<option value="${escapeHtml(sat.id)}" ${selected}>Right: ${escapeHtml(label)}</option>`;
+                                                }).join('')}
+                                            </select>
+                                        </div>
                                     </div>
-                                </div>
+                                ` : ''}
                                 <div class="control-row">
-                                    <label class="control-title"><span>Paired Volume</span><span>Apply the same volume to both speakers</span></label>
+                                    <label class="control-title"><span>Paired Volume${activeStereoPairName ? ` · ${escapeHtml(activeStereoPairName)}` : ''}</span><span>Apply the same volume to both speakers</span></label>
                                     <div style="display:flex;align-items:center;gap:8px;">
                                         <input type="range" min="0" max="100" step="1" value="${draft.stereoVolume}" data-hubmusic-stereo-volume style="width:380px;flex:none;">
                                         <span style="min-width:2.8em;text-align:right;font-variant-numeric:tabular-nums">${draft.stereoVolume}%</span>
-                                        <button class="btn ghost" type="button" data-hubmusic-stereo-test ${state.hubMusicBusy ? 'disabled' : ''}>Channel Test</button>
+                                        <button class="btn ghost" type="button" data-hubmusic-stereo-test ${state.hubMusicBusy ? 'disabled' : ''}>${activeStereoPairName ? `Channel Test: ${escapeHtml(activeStereoPairName)}` : 'Channel Test'}</button>
                                     </div>
                                 </div>
-                                ${draft.stereoLeft && draft.stereoRight && draft.stereoLeft === draft.stereoRight
-                                    ? '<div class="control-note" style="color:rgba(239,107,115,0.9)">Left and right must be different satellites.</div>'
-                                    : ''}
+                                ${!isSavedPairSelected ? `
+                                    <div class="control-row">
+                                        <label class="control-title"><span>Save Stereo Pair</span><span>Name this pairing for quick reuse</span></label>
+                                        <div class="mode-row" style="padding:0;border-top:0;grid-template-columns:minmax(0,1fr) auto auto;">
+                                            <input type="text" data-hubmusic-stereo-name placeholder="Example: Living Room Stereo" value="${escapeHtml(draft.stereoPairName)}">
+                                            <button class="btn ghost" type="button" data-hubmusic-stereo-save ${canSaveStereoPair ? '' : 'disabled'}>Save Pair</button>
+                                            <button class="btn ghost" type="button" data-hubmusic-stereo-delete ${canDeleteStereoPair ? '' : 'disabled'}>Delete Pair</button>
+                                        </div>
+                                    </div>
+                                    ${draft.stereoLeft && draft.stereoRight && draft.stereoLeft === draft.stereoRight
+                                        ? '<div class="control-note" style="color:rgba(239,107,115,0.9)">Left and right must be different satellites.</div>'
+                                        : ''}
+                                ` : ''}
                             ` : ''}
                             ${draft.mode === 'all_reachable' && reachable.length > 1 ? `
                                 <div class="control-row">
@@ -1757,12 +1878,58 @@
             }
         }
 
+        function captureFocusedHubMusicField() {
+            const active = document.activeElement;
+            if (!(active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement)) {
+                return null;
+            }
+
+            let selector = '';
+            if (active.matches('[data-hubmusic-stereo-name]')) {
+                selector = '[data-hubmusic-stereo-name]';
+            } else if (active.matches('[data-hubmusic-radio-name]')) {
+                selector = '[data-hubmusic-radio-name]';
+            } else if (active.matches('[data-hubmusic-radio-url]')) {
+                selector = '[data-hubmusic-radio-url]';
+            } else if (active.matches('[data-hubmusic-stereo-left]')) {
+                selector = '[data-hubmusic-stereo-left]';
+            } else if (active.matches('[data-hubmusic-stereo-right]')) {
+                selector = '[data-hubmusic-stereo-right]';
+            }
+
+            if (!selector) {
+                return null;
+            }
+
+            return {
+                selector,
+                selectionStart: active.selectionStart,
+                selectionEnd: active.selectionEnd,
+            };
+        }
+
+        function restoreFocusedHubMusicField(snapshot) {
+            if (!snapshot?.selector) {
+                return;
+            }
+            const field = document.querySelector(snapshot.selector);
+            if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement || field instanceof HTMLSelectElement)) {
+                return;
+            }
+            field.focus({ preventScroll: true });
+            if ((field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement)
+                && typeof snapshot.selectionStart === 'number' && typeof snapshot.selectionEnd === 'number') {
+                field.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+            }
+        }
+
         function renderCards() {
             const cards = document.getElementById('cards');
             const focusedSpeak = captureFocusedSpeakField();
+            const focusedHubMusic = captureFocusedHubMusicField();
             if (!state.satellites.length) {
                 if (!state.activeSatelliteId) {
-                    state.activeSatelliteId = HUB_MUSIC_TAB_ID;
+                    state.activeSatelliteId = getPreferredInitialActiveTab() || HUB_MUSIC_TAB_ID;
                 }
                 if (state.activeSatelliteId === HUB_MUSIC_TAB_ID) {
                     cards.innerHTML = `${renderTabs()}${renderHubMusicCard()}`;
@@ -1772,16 +1939,17 @@
                     cards.innerHTML = `${renderTabs()}<div class="panel card"><p style="margin:0;color:var(--muted);">No satellites configured.</p></div>`;
                 }
                 restoreFocusedSpeakField(focusedSpeak);
+                restoreFocusedHubMusicField(focusedHubMusic);
                 setGlobalStatus('No satellites configured', 'bad');
                 return;
             }
 
             const knownIds = new Set(state.satellites.map((satellite) => satellite.id));
             if (!state.activeSatelliteId) {
-                state.activeSatelliteId = HUB_MUSIC_TAB_ID;
+                state.activeSatelliteId = getPreferredInitialActiveTab() || HUB_MUSIC_TAB_ID;
             }
             if (state.activeSatelliteId !== HUB_MUSIC_TAB_ID && state.activeSatelliteId !== AIRPLAY_TAB_ID && !knownIds.has(state.activeSatelliteId)) {
-                state.activeSatelliteId = HUB_MUSIC_TAB_ID;
+                state.activeSatelliteId = getPreferredInitialActiveTab() || HUB_MUSIC_TAB_ID;
             }
             const active = state.satellites.find((satellite) => satellite.id === state.activeSatelliteId) || state.satellites[0];
             if (state.activeSatelliteId === HUB_MUSIC_TAB_ID) {
@@ -1792,6 +1960,7 @@
                 cards.innerHTML = `${renderTabs()}${renderSatelliteCard(active)}`;
             }
             restoreFocusedSpeakField(focusedSpeak);
+            restoreFocusedHubMusicField(focusedHubMusic);
         }
 
         function renderNumberControl(id, entity, value) {
@@ -1832,9 +2001,10 @@
                     state.capabilities[satellite.id] = satellite.capabilities || { supports: {}, resolved: {} };
                 }
                 const available = new Set(state.satellites.map((satellite) => satellite.id));
+                const defaultActiveTab = getPreferredInitialActiveTab() || HUB_MUSIC_TAB_ID;
                 state.activeSatelliteId = previousActiveId === HUB_MUSIC_TAB_ID || previousActiveId === AIRPLAY_TAB_ID || available.has(previousActiveId)
                     ? previousActiveId
-                    : (state.activeSatelliteId || HUB_MUSIC_TAB_ID);
+                    : (state.activeSatelliteId || defaultActiveTab);
                 for (const satellite of state.satellites) {
                     const draft = getDraft(satellite.id);
                     const synced = satellite.control_state || {};
@@ -2144,6 +2314,21 @@
             } catch (error) {
                 showToast(error.message || 'Failed to save speaker pairing.', 'bad');
             }
+        }
+
+        function returnToControl() {
+            try {
+                const target = new URL(window.location.href);
+                target.port = '8093';
+                target.pathname = '/';
+                target.search = '';
+                target.hash = '';
+                window.location.href = target.toString();
+                return;
+            } catch {
+                // Ignore and use fallback.
+            }
+            window.location.href = 'http://127.0.0.1:8093/';
         }
 
         async function runHubMusicStereoTest() {
@@ -2541,6 +2726,56 @@
                 return;
             }
 
+            const stereoPairSelect = event.target.closest('[data-hubmusic-stereo-pair-select]');
+            if (stereoPairSelect) {
+                const pair = findSavedStereoPairByName(stereoPairSelect.dataset.hubmusicStereoPairSelect);
+                if (!pair) {
+                    showToast('Stereo pair not found.', 'bad');
+                    return;
+                }
+                state.hubMusicDraft.mode = 'stereo_pair';
+                state.hubMusicDraft.stereoLeft = pair.left;
+                state.hubMusicDraft.stereoRight = pair.right;
+                state.hubMusicDraft.stereoVolume = pair.volume;
+                state.hubMusicDraft.selectedStereoPairName = pair.name;
+                state.hubMusicDraft.stereoPairName = pair.name;
+                renderCards();
+                showToast(`Loaded stereo pair: ${pair.name}.`);
+                return;
+            }
+
+            if (event.target.closest('[data-hubmusic-stereo-save]')) {
+                const draft = getHubMusicDraft();
+                const name = draft.stereoPairName.trim();
+                if (!name) {
+                    showToast('Enter a stereo pair name first.', 'bad');
+                    return;
+                }
+                if (!upsertSavedStereoPair(name, draft.stereoLeft, draft.stereoRight, draft.stereoVolume)) {
+                    showToast('Stereo pair could not be saved.', 'bad');
+                    return;
+                }
+                draft.selectedStereoPairName = name;
+                draft.stereoPairName = name;
+                renderCards();
+                showToast(`Saved stereo pair: ${name}.`);
+                return;
+            }
+
+            if (event.target.closest('[data-hubmusic-stereo-delete]')) {
+                const draft = getHubMusicDraft();
+                const targetName = draft.selectedStereoPairName || draft.stereoPairName;
+                if (!deleteSavedStereoPairByName(targetName)) {
+                    showToast('Stereo pair could not be deleted.', 'bad');
+                    return;
+                }
+                draft.selectedStereoPairName = '';
+                draft.stereoPairName = '';
+                renderCards();
+                showToast(`Deleted stereo pair: ${targetName}.`);
+                return;
+            }
+
             if (event.target.closest('[data-airplay-start]')) {
                 startAirPlayReceiver();
                 return;
@@ -2640,6 +2875,9 @@
             const modeBtn = event.target.closest('[data-hubmusic-mode-btn]');
             if (modeBtn) {
                 state.hubMusicDraft.mode = modeBtn.dataset.hubmusicModeBtn;
+                if (modeBtn.dataset.hubmusicModeBtn === 'stereo_pair') {
+                    state.hubMusicDraft.selectedStereoPairName = '';
+                }
                 if (modeBtn.dataset.hubmusicSatSelect) {
                     state.hubMusicDraft.satellite = modeBtn.dataset.hubmusicSatSelect;
                 }
@@ -2712,6 +2950,12 @@
                 return;
             }
 
+            const stereoNameInput = event.target.closest('[data-hubmusic-stereo-name]');
+            if (stereoNameInput) {
+                state.hubMusicDraft.stereoPairName = stereoNameInput.value;
+                return;
+            }
+
             const hubMusicField = event.target.closest('[data-hubmusic-field]');
             if (hubMusicField) {
                 state.hubMusicDraft[hubMusicField.dataset.hubmusicField] = hubMusicField.value;
@@ -2763,6 +3007,7 @@
             const stereoLeft = event.target.closest('[data-hubmusic-stereo-left]');
             if (stereoLeft) {
                 state.hubMusicDraft.stereoLeft = stereoLeft.value;
+                state.hubMusicDraft.selectedStereoPairName = '';
                 renderCards();
                 saveHubMusicStereoDefaults();
                 return;
@@ -2771,6 +3016,7 @@
             const stereoRight = event.target.closest('[data-hubmusic-stereo-right]');
             if (stereoRight) {
                 state.hubMusicDraft.stereoRight = stereoRight.value;
+                state.hubMusicDraft.selectedStereoPairName = '';
                 renderCards();
                 saveHubMusicStereoDefaults();
                 return;
@@ -2778,9 +3024,16 @@
 
             const stereoVolume = event.target.closest('[data-hubmusic-stereo-volume]');
             if (stereoVolume) {
-                state.hubMusicDraft.stereoVolume = Math.max(0, Math.min(100, Number(stereoVolume.value || 50)));
+                const newVolume = Math.max(0, Math.min(100, Number(stereoVolume.value || 50)));
+                state.hubMusicDraft.stereoVolume = newVolume;
+                const currentPairName = String(state.hubMusicDraft.selectedStereoPairName || '').trim();
+                if (currentPairName) {
+                    upsertSavedStereoPair(currentPairName, state.hubMusicDraft.stereoLeft, state.hubMusicDraft.stereoRight, newVolume);
+                } else {
+                    state.hubMusicDraft.selectedStereoPairName = '';
+                }
                 renderCards();
-                applyHubMusicStereoVolume(state.hubMusicDraft.stereoVolume);
+                applyHubMusicStereoVolume(newVolume);
                 return;
             }
 
@@ -2792,6 +3045,9 @@
 
         document.getElementById('refresh-btn').addEventListener('click', async () => {
             await refreshFromRuntime(false);
+        });
+        document.getElementById('return-control-btn').addEventListener('click', () => {
+            returnToControl();
         });
         refreshFromRuntime(false);
         

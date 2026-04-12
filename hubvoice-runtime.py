@@ -140,6 +140,75 @@ else:
     ROOT = Path(__file__).resolve().parent
 
 _BUNDLED_ROOT = Path(getattr(sys, "_MEIPASS", ROOT))
+
+
+def get_launcher_path() -> str:
+    configured = str(os.getenv("HUBVOICESAT_LAUNCHER_PATH", "")).strip()
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured))
+    candidates.extend(
+        [
+            ROOT / "HubVoiceSatSetup.exe",
+            ROOT / "HubVoiceSat.exe",
+            _BUNDLED_ROOT / "HubVoiceSatSetup.exe",
+            _BUNDLED_ROOT / "HubVoiceSat.exe",
+        ]
+    )
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return str(candidate)
+        except Exception:
+            continue
+    return configured or str(ROOT / "HubVoiceSatSetup.exe")
+
+
+def get_launcher_version() -> str:
+    launcher_path = get_launcher_path()
+    p = Path(launcher_path)
+    if not p.exists():
+        return "not_found"
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            size = ctypes.windll.version.GetFileVersionInfoSizeW(str(p), None)
+            if size > 0:
+                buf = ctypes.create_string_buffer(size)
+                ctypes.windll.version.GetFileVersionInfoW(str(p), 0, size, buf)
+                lptr = ctypes.c_void_p()
+                lsize = ctypes.c_uint()
+                if ctypes.windll.version.VerQueryValueW(buf, "\\", ctypes.byref(lptr), ctypes.byref(lsize)):
+                    class VS_FIXEDFILEINFO(ctypes.Structure):
+                        _fields_ = [
+                            ("dwSignature", ctypes.c_uint32),
+                            ("dwStrucVersion", ctypes.c_uint32),
+                            ("dwFileVersionMS", ctypes.c_uint32),
+                            ("dwFileVersionLS", ctypes.c_uint32),
+                            ("dwProductVersionMS", ctypes.c_uint32),
+                            ("dwProductVersionLS", ctypes.c_uint32),
+                            ("dwFileFlagsMask", ctypes.c_uint32),
+                            ("dwFileFlags", ctypes.c_uint32),
+                            ("dwFileOS", ctypes.c_uint32),
+                            ("dwFileType", ctypes.c_uint32),
+                            ("dwFileSubtype", ctypes.c_uint32),
+                            ("dwFileDateMS", ctypes.c_uint32),
+                            ("dwFileDateLS", ctypes.c_uint32),
+                        ]
+
+                    info = ctypes.cast(lptr, ctypes.POINTER(VS_FIXEDFILEINFO)).contents
+                    major = (info.dwFileVersionMS >> 16) & 0xFFFF
+                    minor = info.dwFileVersionMS & 0xFFFF
+                    build = (info.dwFileVersionLS >> 16) & 0xFFFF
+                    rev = info.dwFileVersionLS & 0xFFFF
+                    return f"{major}.{minor}.{build}.{rev}"
+        except Exception:
+            pass
+
+    return "unknown"
+
 CONTROL_PAGE_CANDIDATES = (
     ROOT / "control.html",
     _BUNDLED_ROOT / "control.html",
@@ -163,12 +232,8 @@ SATELLITES_PATH = USER_DATA_DIR / "satellites.csv"
 RECORDINGS_PATH = USER_DATA_DIR / "recordings"
 LOGS_PATH = USER_DATA_DIR / "logs"
 SCHEDULES_PATH = USER_DATA_DIR / "scheduled-events.json"
-LEGACY_CONFIG_CANDIDATES = (ROOT / "hubvoice-sat-setup.json", Path.cwd() / "hubvoice-sat-setup.json")
-LEGACY_SATELLITES_CANDIDATES = (ROOT / "satellites.csv", Path.cwd() / "satellites.csv")
 LOGS_PATH.mkdir(parents=True, exist_ok=True)
 RECORDINGS_PATH.mkdir(parents=True, exist_ok=True)
-
-_LEGACY_USER_FILES_MIGRATED = False
 
 AIRPLAY_RECEIVER_SRC_DIR = ROOT / "build" / "airplay2-receiver-src"
 AIRPLAY_RECEIVER_SCRIPT = AIRPLAY_RECEIVER_SRC_DIR / "ap2-receiver.py"
@@ -416,6 +481,54 @@ class AppState:
             return dict(self._state)
 
 
+_STARTUP_TIMING_LOCK = threading.Lock()
+_STARTUP_TS = time.time()
+_STARTUP_STARTED_AT = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+_STARTUP_MILESTONES: list[dict[str, object]] = [
+    {
+        "name": "runtime_boot",
+        "at": _STARTUP_STARTED_AT,
+        "elapsed_seconds": 0,
+    }
+]
+
+
+def _record_startup_milestone(name: str) -> None:
+    marker = str(name or "").strip()
+    if not marker:
+        return
+    now_ts = time.time()
+    with _STARTUP_TIMING_LOCK:
+        if any(str(item.get("name", "")) == marker for item in _STARTUP_MILESTONES):
+            return
+        _STARTUP_MILESTONES.append(
+            {
+                "name": marker,
+                "at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "elapsed_seconds": int(max(0, now_ts - _STARTUP_TS)),
+            }
+        )
+
+
+def _startup_timing_snapshot(voice_assistant: dict[str, dict] | None = None) -> dict:
+    now_ts = time.time()
+    elapsed = int(max(0, now_ts - _STARTUP_TS))
+    bridges = voice_assistant or {}
+    connected_bridges = 0
+    for bridge in bridges.values():
+        if bridge and bool(bridge.get("connected")):
+            connected_bridges += 1
+    with _STARTUP_TIMING_LOCK:
+        milestones = [dict(item) for item in _STARTUP_MILESTONES]
+    ready = connected_bridges > 0
+    return {
+        "started_at": _STARTUP_STARTED_AT,
+        "elapsed_seconds": elapsed,
+        "ready": ready,
+        "milestones": milestones,
+    }
+
+
 class HubMusicState:
     """Track requested HubMusic routing state for the control UI."""
 
@@ -584,7 +697,7 @@ class SatelliteConnectionPool:
                 evict_host = next(iter(self._pool.keys()))
                 await self._disconnect_host_async(evict_host)
 
-            client = APIClient(host, 6054, None, client_info="HubVoiceSatRuntime")
+            client = APIClient(host, 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
             timeout_s = float(_command_tuning().get("media_connect_timeout", 2.0))
             await asyncio.wait_for(client.connect(login=False), timeout=max(0.6, timeout_s))
             self._pool[host] = client
@@ -765,20 +878,7 @@ def load_config() -> dict:
         "hubitat_access_token": "",
         "piper_voice_model": "piper_voices/en_US-amy-medium.onnx",
     }
-    _maybe_migrate_legacy_user_files()
     if not CONFIG_PATH.exists():
-        for candidate in LEGACY_CONFIG_CANDIDATES:
-            if not candidate.exists() or candidate.resolve() == CONFIG_PATH.resolve():
-                continue
-            try:
-                loaded = json.loads(candidate.read_text(encoding="utf-8-sig"))
-                if isinstance(loaded, dict):
-                    default.update({k: str(v) for k, v in loaded.items() if v is not None})
-                    with contextlib.suppress(Exception):
-                        CONFIG_PATH.write_text(json.dumps(loaded, indent=4), encoding="utf-8")
-                    break
-            except Exception:
-                continue
         return default
     try:
         loaded = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
@@ -790,7 +890,6 @@ def load_config() -> dict:
 
 
 def _load_runtime_config_raw() -> dict:
-    _maybe_migrate_legacy_user_files()
     if not CONFIG_PATH.exists():
         return {}
     try:
@@ -1064,62 +1163,12 @@ def _is_populated_satellites_text(text: str) -> bool:
     return False
 
 
-def _maybe_migrate_legacy_user_files() -> None:
-    global _LEGACY_USER_FILES_MIGRATED
-    if _LEGACY_USER_FILES_MIGRATED:
-        return
-
-    try:
-        if not CONFIG_PATH.exists():
-            for candidate in LEGACY_CONFIG_CANDIDATES:
-                if not candidate.exists() or candidate.resolve() == CONFIG_PATH.resolve():
-                    continue
-                try:
-                    raw = candidate.read_text(encoding="utf-8-sig")
-                    loaded = json.loads(raw)
-                    if isinstance(loaded, dict):
-                        CONFIG_PATH.write_text(json.dumps(loaded, indent=4), encoding="utf-8")
-                        logging.info("Migrated legacy config from %s to %s", candidate, CONFIG_PATH)
-                        break
-                except Exception:
-                    continue
-
-        if not SATELLITES_PATH.exists():
-            for candidate in LEGACY_SATELLITES_CANDIDATES:
-                if not candidate.exists() or candidate.resolve() == SATELLITES_PATH.resolve():
-                    continue
-                try:
-                    raw = candidate.read_text(encoding="utf-8-sig")
-                    if _is_populated_satellites_text(raw):
-                        SATELLITES_PATH.write_text(raw, encoding="utf-8")
-                        logging.info("Migrated legacy satellites from %s to %s", candidate, SATELLITES_PATH)
-                        break
-                except Exception:
-                    continue
-    finally:
-        _LEGACY_USER_FILES_MIGRATED = True
-
 
 def load_satellites() -> list[dict]:
     items: list[dict] = []
-    _maybe_migrate_legacy_user_files()
     raw_text = ""
     if SATELLITES_PATH.exists():
         raw_text = SATELLITES_PATH.read_text(encoding="utf-8-sig")
-    else:
-        for candidate in LEGACY_SATELLITES_CANDIDATES:
-            if not candidate.exists() or candidate.resolve() == SATELLITES_PATH.resolve():
-                continue
-            try:
-                candidate_text = candidate.read_text(encoding="utf-8-sig")
-            except Exception:
-                continue
-            if not _is_populated_satellites_text(candidate_text):
-                continue
-            raw_text = candidate_text
-            with contextlib.suppress(Exception):
-                SATELLITES_PATH.write_text(candidate_text, encoding="utf-8")
-            break
 
     if not raw_text:
         return items
@@ -2639,7 +2688,7 @@ async def send_to_satellite_async(satellite_host: str, media_url: str) -> None:
         raise ValueError("satellite_host and media_url are required")
 
     cached_key = _media_player_key_cache.get(satellite_host)
-    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
+    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
     try:
         await asyncio.wait_for(client.connect(login=False), timeout=CONNECTION_TIMEOUT)
         if cached_key is None:
@@ -2804,7 +2853,7 @@ async def _read_satellite_tone_settings_async(satellite_host: str) -> tuple[floa
     if not bass_aliases and not treble_aliases:
         return None
 
-    client = APIClient(host, 6054, None, client_info="HubVoiceSatRuntime")
+    client = APIClient(host, 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
     connect_timeout = min(CONNECTION_TIMEOUT, float(_command_tuning().get("media_connect_timeout", 3.0)))
     entity_timeout = min(ENTITY_LIST_TIMEOUT, 2.0)
     state_timeout = 1.6
@@ -3082,7 +3131,7 @@ async def play_media_on_satellite_async(satellite_host: str, media_url: str, ann
         raise ValueError("satellite_host and media_url are required")
 
     cached_key = _media_player_key_cache.get(satellite_host)
-    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
+    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
     try:
         await asyncio.wait_for(client.connect(login=False), timeout=CONNECTION_TIMEOUT)
         if cached_key is None:
@@ -3143,7 +3192,7 @@ def prepare_satellite_for_tts(satellite_host: str) -> None:
 
     async def _fast_prestop() -> None:
         cached_key = _media_player_key_cache.get(satellite_host)
-        client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
+        client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
         try:
             await asyncio.wait_for(client.connect(login=False), timeout=TTS_PRESTOP_CONNECT_TIMEOUT)
             if cached_key is None:
@@ -3176,7 +3225,7 @@ async def stop_media_on_satellite_async(satellite_host: str, announcement: bool 
         raise ValueError("satellite_host is required")
 
     cached_key = _media_player_key_cache.get(satellite_host)
-    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
+    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
     try:
         await asyncio.wait_for(client.connect(login=False), timeout=CONNECTION_TIMEOUT)
         if cached_key is None:
@@ -3222,7 +3271,7 @@ async def _fast_stop_media_on_satellite_async(satellite_host: str) -> bool:
     if cached_key is None:
         return False
 
-    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
+    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
     try:
         await asyncio.wait_for(client.connect(login=False), timeout=1.2)
         client.media_player_command(cached_key, command=MediaPlayerCommand.STOP, announcement=False)
@@ -3368,7 +3417,7 @@ async def stop_satellite_playback_async(satellite_host: str) -> None:
     if not satellite_host:
         raise ValueError("satellite_host is required")
 
-    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
+    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
     try:
         await asyncio.wait_for(client.connect(login=False), timeout=CONNECTION_TIMEOUT)
         entities, _ = await asyncio.wait_for(
@@ -3396,7 +3445,7 @@ async def set_satellite_media_mute_async(satellite_host: str, muted: bool) -> No
     if not satellite_host:
         raise ValueError("satellite_host is required")
 
-    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
+    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
     try:
         await asyncio.wait_for(client.connect(login=False), timeout=CONNECTION_TIMEOUT)
         entities, _ = await asyncio.wait_for(
@@ -3447,7 +3496,7 @@ async def set_satellite_media_volume_async(satellite_host: str, volume_percent: 
     entity_timeout = min(ENTITY_LIST_TIMEOUT, 2.0)
 
     cached_key = _media_player_key_cache.get(satellite_host)
-    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
+    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
     try:
         await asyncio.wait_for(client.connect(login=False), timeout=connect_timeout)
         if cached_key is not None:
@@ -3545,7 +3594,7 @@ async def _list_satellite_entity_ids_async(satellite_host: str) -> set[str]:
     if not satellite_host:
         return set()
 
-    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
+    client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
     try:
         await asyncio.wait_for(client.connect(login=False), timeout=CONNECTION_TIMEOUT)
         entities, _ = await asyncio.wait_for(
@@ -3672,7 +3721,7 @@ async def set_satellite_number_async(satellite_host: str, entity_object_id: str,
 
     last_exc: Exception | None = None
     for attempt in range(1, SATELLITE_NUMBER_MAX_RETRIES + 1):
-        client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
+        client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
         try:
             await asyncio.wait_for(client.connect(login=False), timeout=CONNECTION_TIMEOUT)
 
@@ -3754,7 +3803,7 @@ async def set_satellite_switch_async(satellite_host: str, entity_object_id: str,
     if not satellite_host or not entity_object_id:
         raise ValueError("satellite_host and entity_object_id are required")
     try:
-        client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime")
+        client = APIClient(satellite_host, 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
         await asyncio.wait_for(client.connect(login=False), timeout=CONNECTION_TIMEOUT)
         try:
             entities, _ = await asyncio.wait_for(
@@ -5373,20 +5422,37 @@ class VoiceAssistantBridge:
         self._last_error = ""
         self._last_event = "starting"
         self._connected = False
+        self._last_wake_ts: float | None = None
+        self._last_wake_at = ""
+        self._last_wake_phrase = ""
         self._pending_broadcast: dict[str, float] = {}
         self._pending_broadcast_target: dict[str, str] = {}
 
     def start(self) -> None:
         self._thread.start()
 
-    def snapshot(self) -> dict:
+    def snapshot(self, now_ts: float | None = None) -> dict:
+        sample_ts = time.time() if now_ts is None else now_ts
         with self._lock:
+            last_wake_ts = self._last_wake_ts
+            last_wake_at = self._last_wake_at
+            last_wake_phrase = self._last_wake_phrase
             return {
                 "status": self._status,
                 "connected": self._connected,
                 "last_error": self._last_error,
                 "last_event": self._last_event,
+                "last_wake_at": last_wake_at,
+                "last_wake_ago_secs": (max(0.0, sample_ts - last_wake_ts) if last_wake_ts is not None else None),
+                "last_wake_phrase": last_wake_phrase,
             }
+
+    def _record_wake(self, wake_word_phrase: str | None) -> None:
+        now_ts = time.time()
+        with self._lock:
+            self._last_wake_ts = now_ts
+            self._last_wake_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            self._last_wake_phrase = str(wake_word_phrase or "").strip()
 
     def _set_state(self, *, status: str | None = None, connected: bool | None = None, error: str | None = None, event: str | None = None) -> None:
         with self._lock:
@@ -5424,7 +5490,7 @@ class VoiceAssistantBridge:
                 await self._on_disconnect(expected_disconnect)
 
             _sat_label = f"{satellite.get('alias') or satellite['id']} ({satellite['host']})"
-            client = APIClient(satellite["host"], 6054, None, client_info="HubVoiceSatRuntime")
+            client = APIClient(satellite["host"], 6054, None, client_info="HubVoiceSatRuntime", timezone="UTC")
             try:
                 self._set_state(status="connecting", connected=False, error="", event="connecting")
                 logging.info("Voice bridge connecting to %s port 6054...", _sat_label)
@@ -5587,6 +5653,7 @@ class VoiceAssistantBridge:
 
     async def _handle_start(self, conversation_id: str, flags: int, audio_settings, wake_word_phrase: str | None) -> int | None:
         satellite_id = self._satellite_id or "default"
+        self._record_wake(wake_word_phrase)
         hubmusic_snapshot = _HUB_MUSIC_STATE.snapshot()
         with self._lock:
             self._session = VoiceSession(
@@ -8143,17 +8210,23 @@ class RuntimeHandler(BaseHTTPRequestHandler):
         
         if parsed.path in ("", "/"):
             state = _APP_STATE.snapshot()
+            launcher_path = get_launcher_path()
+            launcher_version = get_launcher_version()
+            voice_assistant = {sid: b.snapshot() for sid, b in _VOICE_BRIDGES.items()}
             self._send_json(
                 {
                     "ok": True,
                     "service": "HubVoiceSat runtime",
+                    "launcher_path": launcher_path,
+                    "launcher_version": launcher_version,
                     "port": get_runtime_port(),
                     "queue_depth": _WORK_QUEUE.qsize(),
                     "last_action": state.get("last_action", "idle"),
                     "last_error": state.get("last_error", ""),
                     "last_transcript": state.get("last_transcript", ""),
                     "command_mode": _get_command_mode(),
-                    "voice_assistant": {sid: b.snapshot() for sid, b in _VOICE_BRIDGES.items()},
+                    "voice_assistant": voice_assistant,
+                    "startup_timing": _startup_timing_snapshot(voice_assistant),
                     "scheduler": _SCHEDULE_MANAGER.snapshot(),
                 }
             )
@@ -8173,12 +8246,18 @@ class RuntimeHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/health":
             state = _APP_STATE.snapshot()
+            launcher_path = get_launcher_path()
+            launcher_version = get_launcher_version()
+            voice_assistant = {sid: b.snapshot() for sid, b in _VOICE_BRIDGES.items()}
             self._send_json(
                 {
                     "ok": True,
                     "status": "online",
+                    "launcher_path": launcher_path,
+                    "launcher_version": launcher_version,
                     "queue_depth": _WORK_QUEUE.qsize(),
-                    "voice_assistant": {sid: b.snapshot() for sid, b in _VOICE_BRIDGES.items()},
+                    "voice_assistant": voice_assistant,
+                    "startup_timing": _startup_timing_snapshot(voice_assistant),
                     "scheduler": _SCHEDULE_MANAGER.snapshot(),
                 }
             )
@@ -8201,23 +8280,53 @@ class RuntimeHandler(BaseHTTPRequestHandler):
             satellites = load_satellites()
             controls = build_satellite_control_metadata()
             satellite_rows = []
+            sample_ts = time.time()
+            last_active_speaker: dict[str, object] | None = None
             for sat in satellites:
                 reachable = test_satellite_connection(sat["host"])
+                bridge = _VOICE_BRIDGES.get(sat["id"]) or _VOICE_BRIDGES.get(str(sat["id"]).strip().lower())
+                bridge_snapshot = bridge.snapshot(now_ts=sample_ts) if bridge else {
+                    "status": "disconnected",
+                    "connected": False,
+                    "last_error": "",
+                    "last_event": "unknown",
+                    "last_wake_at": "",
+                    "last_wake_ago_secs": None,
+                    "last_wake_phrase": "",
+                }
                 control_state = _get_control_deck_state(sat["id"], controls)
                 bass_db, treble_db = _get_user_tone_settings(sat["host"])
                 control_state["bass_level"] = bass_db
                 control_state["treble_level"] = treble_db
+                row = {
+                    **sat,
+                    "reachable": reachable,
+                    "web_url": f"http://{sat['host']}:8080/",
+                    "control_state": control_state,
+                    "stream_status": _get_satellite_stream_status(sat["id"]),
+                    "voice_bridge": bridge_snapshot,
+                    "ready_for_voice": bool(reachable and bridge_snapshot.get("connected")),
+                    "last_wake_at": bridge_snapshot.get("last_wake_at", ""),
+                    "last_wake_ago_secs": bridge_snapshot.get("last_wake_ago_secs"),
+                    # Keep /satellites fast; capabilities can be fetched via /satellite-capabilities on demand.
+                    "capabilities": {"supports": {}, "resolved": {}},
+                }
+                wake_age = row.get("last_wake_ago_secs")
+                if isinstance(wake_age, (int, float)):
+                    if (last_active_speaker is None) or (float(wake_age) < float(last_active_speaker.get("age_secs", float("inf")))):
+                        last_active_speaker = {
+                            "satellite_id": row.get("id", ""),
+                            "alias": row.get("alias", ""),
+                            "host": row.get("host", ""),
+                            "age_secs": float(wake_age),
+                        }
                 satellite_rows.append(
-                    {
-                        **sat,
-                        "reachable": reachable,
-                        "web_url": f"http://{sat['host']}:8080/",
-                        "control_state": control_state,
-                        "stream_status": _get_satellite_stream_status(sat["id"]),
-                        # Keep /satellites fast; capabilities can be fetched via /satellite-capabilities on demand.
-                        "capabilities": {"supports": {}, "resolved": {}},
-                    }
+                    row
                 )
+            if last_active_speaker:
+                active_sat = str(last_active_speaker.get("satellite_id", "")).strip()
+                for row in satellite_rows:
+                    row["is_last_active_speaker"] = str(row.get("id", "")).strip() == active_sat
             self._send_json(
                 {
                     "ok": True,
@@ -8225,6 +8334,7 @@ class RuntimeHandler(BaseHTTPRequestHandler):
                     "default": satellites[0]["id"] if satellites else "",
                     "controls": controls,
                     "satellites": satellite_rows,
+                    "last_active_speaker": last_active_speaker,
                 }
             )
             return
@@ -8348,12 +8458,14 @@ class RuntimeHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    _record_startup_milestone("main_entered")
     acquire_runtime_single_instance_lock()
     try:
         # Validate configuration early
         logging.info("Validating configuration...")
         validate_startup_config()
         logging.info("Configuration validation passed")
+        _record_startup_milestone("config_validated")
     except Exception as e:
         logging.error("Configuration validation failed: %s", e)
         raise
@@ -8361,6 +8473,7 @@ def main() -> None:
     host = "0.0.0.0"
     port = get_runtime_port()
     httpd = ThreadingHTTPServer((host, port), RuntimeHandler)
+    _record_startup_milestone("http_listener_ready")
     
     # Start worker thread
     threading.Thread(target=worker_loop, daemon=True).start()
@@ -8372,6 +8485,7 @@ def main() -> None:
     # Start voice assistant bridges (one per satellite)
     for _bridge in _VOICE_BRIDGES.values():
         _bridge.start()
+    _record_startup_milestone("voice_bridges_started")
 
     # Watch for satellites added after startup and start their bridges automatically.
     def satellite_watcher() -> None:
@@ -8412,6 +8526,7 @@ def main() -> None:
     
     threading.Thread(target=cleanup_scheduler, daemon=True).start()
     threading.Thread(target=schedule_scheduler, daemon=True).start()
+    _record_startup_milestone("background_workers_started")
 
     # Watchdog: restart ffmpeg if it exits unexpectedly while music should be playing
     def ffmpeg_watchdog() -> None:
@@ -8440,6 +8555,7 @@ def main() -> None:
                 logging.error("HubMusic watchdog: failed to restart ffmpeg: %s", exc)
 
     threading.Thread(target=ffmpeg_watchdog, daemon=True).start()
+    _record_startup_milestone("runtime_ready")
 
     logging.info("HubVoiceSat runtime listening on %s:%s", host, port)
     try:
@@ -8455,4 +8571,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 

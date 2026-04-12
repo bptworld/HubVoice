@@ -51,7 +51,11 @@
         <h1 style="margin:0;">HubVoiceSat Setup</h1>
         <p id="build_meta" class="muted mono" style="margin:4px 0 0;">Firmware: ...</p>
       </div>
-      <button onclick="openControlDeck()" style="background:#1f9d55;font-size:1rem;padding:10px 18px;">HubMusic</button>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button onclick="openDebugPage()" class="alt" style="font-size:1rem;padding:10px 18px;">Debug</button>
+        <button onclick="openSpeakersPage()" class="alt" style="font-size:1rem;padding:10px 18px;">Speakers</button>
+        <button onclick="openControlDeck()" style="background:#1f9d55;font-size:1rem;padding:10px 18px;">HubMusic</button>
+      </div>
     </div>
 
     <div class="card">
@@ -136,7 +140,15 @@
 
     function openControlDeck() {
       const url = (cachedState && cachedState.hubvoice_url) || 'http://127.0.0.1:8080';
-      window.open(url.replace(/\/$/, '') + '/control?_=' + Date.now(), '_blank');
+      window.location.assign(url.replace(/\/$/, '') + '/control?nav=setup&ts=' + Date.now());
+    }
+
+    function openSpeakersPage() {
+      window.location.assign('/speakers?nav=setup&ts=' + Date.now());
+    }
+
+    function openDebugPage() {
+      window.location.assign('/debug?nav=setup&ts=' + Date.now());
     }
 
     function statusClassFromValue(value) {

@@ -1,0 +1,165 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>HubVoiceSat Speakers</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; background:#111; color:#f5f5f5; margin:0; }
+    .wrap { max-width: 920px; margin: 0 auto; padding: 24px; }
+    .card { background:#1c1c1c; border:1px solid #343434; border-radius:12px; padding:18px; margin-top:16px; }
+    h1, h2 { margin:0 0 10px; }
+    p { color:#c9c9c9; line-height:1.45; }
+    .muted { color:#aaa; }
+    .mono { font-family: Consolas, monospace; }
+    textarea { width:100%; box-sizing:border-box; background:#101010; color:#f5f5f5; border:1px solid #404040; border-radius:8px; padding:10px 12px; min-height:110px; resize:vertical; font-family:Consolas, monospace; }
+    button { background:#2b72d6; color:#fff; border:none; border-radius:8px; padding:10px 14px; cursor:pointer; margin:0; display:inline-flex; align-items:center; justify-content:center; min-height:40px; line-height:1.2; }
+    button.alt { background:#444; }
+    .action-row { display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:10px; align-items:stretch; }
+    .action-row button { width:100%; }
+    .status { margin-top:10px; font-weight:600; }
+    .status-box { background:#101010; border:1px solid #383838; border-radius:10px; padding:12px; margin-top:10px; }
+    .status-row { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+    .badge { display:inline-block; border-radius:999px; padding:2px 8px; font-size:12px; margin-left:8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+      <div>
+        <h1 style="margin:0;">Speaker Targets</h1>
+        <p class="muted mono" style="margin:4px 0 0;">Configure Sonos and DLNA/UPnP speakers for HubMusic.</p>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button class="alt" onclick="goBack()" style="font-size:1rem;padding:10px 18px;">Back to Setup</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Sonos Speakers</h2>
+      <label for="sonos_speakers_text">Known Sonos speakers</label>
+      <textarea id="sonos_speakers_text" placeholder="living-room-sonos,192.168.1.100,Living Room"></textarea>
+      <p class="muted">One line per speaker in the format <span class="mono">name,ip[,alias]</span>.</p>
+    </div>
+
+    <div class="card">
+      <h2>DLNA / UPnP Speakers</h2>
+      <label for="dlna_speakers_text">Known DLNA/UPnP speakers</label>
+      <textarea id="dlna_speakers_text" placeholder="denon-living-room,192.168.1.120,Denon AVR"></textarea>
+      <p class="muted">One line per speaker in the format <span class="mono">name,ip[,alias]</span>.</p>
+    </div>
+
+    <div class="card">
+      <div class="action-row">
+        <button onclick="saveSpeakers()">Save Speakers</button>
+        <button class="alt" onclick="discoverSonosSpeakers()">Discover Sonos Speakers</button>
+        <button class="alt" onclick="discoverDlnaSpeakers()">Discover DLNA Speakers</button>
+        <button class="alt" onclick="loadSpeakers()">Reload</button>
+        <button class="alt" onclick="refreshStatus()">Refresh Status</button>
+      </div>
+      <div id="status" class="status"></div>
+    </div>
+
+    <div class="card">
+      <h2>Configured Speakers</h2>
+      <div id="sonos_status"></div>
+      <div id="dlna_status"></div>
+    </div>
+  </div>
+
+  <script>
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function goBack() {
+      window.location.assign('/?nav=speakers&ts=' + Date.now());
+    }
+
+    async function loadSpeakers() {
+      const res = await fetch('/api/speakers/state');
+      const data = await res.json();
+      document.getElementById('sonos_speakers_text').value = data.sonos_speakers_text || '';
+      document.getElementById('dlna_speakers_text').value = data.dlna_speakers_text || '';
+      document.getElementById('status').textContent = '';
+      await refreshStatus();
+    }
+
+    async function saveSpeakers() {
+      const payload = {
+        sonos_speakers_text: document.getElementById('sonos_speakers_text').value,
+        dlna_speakers_text: document.getElementById('dlna_speakers_text').value
+      };
+
+      const res = await fetch('/api/speakers/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      document.getElementById('status').textContent = data.message || (data.ok ? 'Saved.' : 'Failed.');
+      await refreshStatus();
+    }
+
+    async function discoverSonosSpeakers() {
+      document.getElementById('status').textContent = 'Discovering Sonos speakers...';
+      const res = await fetch('/api/speakers/discover_sonos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await res.json();
+      if (typeof data.sonos_speakers_text === 'string') {
+        document.getElementById('sonos_speakers_text').value = data.sonos_speakers_text;
+      }
+      document.getElementById('status').textContent = data.message || (data.ok ? 'Discovery complete.' : 'Discovery failed.');
+      await refreshStatus();
+    }
+
+    async function discoverDlnaSpeakers() {
+      document.getElementById('status').textContent = 'Discovering DLNA/UPnP speakers...';
+      const res = await fetch('/api/speakers/discover_dlna', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await res.json();
+      if (typeof data.dlna_speakers_text === 'string') {
+        document.getElementById('dlna_speakers_text').value = data.dlna_speakers_text;
+      }
+      document.getElementById('status').textContent = data.message || (data.ok ? 'Discovery complete.' : 'Discovery failed.');
+      await refreshStatus();
+    }
+
+    function renderSpeakerCards(items, badgeColor, badgeText) {
+      if (!Array.isArray(items) || !items.length) {
+        return '<p class="muted">None configured.</p>';
+      }
+      return items.map((speaker) => {
+        const port = speaker.web_port ? ':' + speaker.web_port : '';
+        const url = 'http://' + escapeHtml(speaker.ip) + port + '/';
+        return `
+          <div class="status-box">
+            <div class="status-row">
+              <div><strong>${escapeHtml(speaker.alias || speaker.name)}</strong> <span class="muted">(Name: ${escapeHtml(speaker.name)} | ${escapeHtml(speaker.ip)})</span><span class="badge" style="background:${badgeColor};color:#fff;">${badgeText}</span></div>
+              <div class="muted">${speaker.ping ? 'Online' : 'Offline'}</div>
+            </div>
+            <p class="mono muted" style="margin:8px 0 0;">URL: ${url}</p>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function refreshStatus() {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+      document.getElementById('sonos_status').innerHTML = '<h3>Sonos</h3>' + renderSpeakerCards(data.sonos_speakers || [], '#f97316', 'Sonos');
+      document.getElementById('dlna_status').innerHTML = '<h3>DLNA / UPnP</h3>' + renderSpeakerCards(data.dlna_speakers || [], '#2563eb', 'DLNA');
+    }
+
+    loadSpeakers();
+  </script>
+</body>
+</html>

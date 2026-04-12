@@ -22,7 +22,7 @@ substitutions:
   hidden_ssid: "false"
   device_name: "hubvoice-sat-fph"
   friendly_name: "HubVoiceSat FPH"
-  firmware_version: "2026.04.05.1"
+  firmware_version: "2026.04.12.4"
   xmos_fw_version: "v1.0.3"
 
   # ============================================================================
@@ -94,10 +94,6 @@ esphome:
               lambda: return id(init_in_progress);
             then:
               - lambda: id(init_in_progress) = false;
-              - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
-              - script.execute: configure_selected_wake_word
-              - micro_wake_word.start:
-              - script.execute: control_leds
         - component.update: firmware_version_text
 
 esp32:
@@ -154,20 +150,20 @@ wifi:
       gateway: 192.168.4.1
       subnet: 255.255.255.0
   on_connect:
+    - logger.log:
+        level: INFO
+        format: "WiFi: connected"
     - lambda: id(improv_ble_in_progress) = false;
     - delay: 5s
-    - ble.disable:
     - if:
         condition:
           lambda: return id(init_in_progress);
         then:
           - lambda: id(init_in_progress) = false;
-          - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
-    - script.execute: configure_selected_wake_word
-    - micro_wake_word.start:
-    - script.execute: control_leds
   on_disconnect:
-    - ble.enable:
+    - logger.log:
+        level: INFO
+        format: "WiFi: disconnected"
     - micro_wake_word.stop:
     - script.execute: control_leds
 
@@ -175,6 +171,7 @@ network:
   enable_ipv6: true
 
 logger:
+  id: sat_logger
   level: DEBUG
   logs:
     component: DEBUG
@@ -208,29 +205,30 @@ ota:
           then:
             - voice_assistant.stop:
       - micro_wake_word.stop:
-    on_error:
-      - script.execute: configure_selected_wake_word
-      - micro_wake_word.start:
-      - script.execute: control_leds
-    on_abort:
-      - script.execute: configure_selected_wake_word
-      - micro_wake_word.start:
-      - script.execute: control_leds
 
 web_server:
   port: ${http_server_port}
   local: true
   js_include: web-ui-custom.js
 
-captive_portal:
+# Wake-priority mode: disable BLE/Improv services to free RAM for micro_wake_word tensors.
+# captive_portal:
 
-esp32_improv:
-  authorizer: none
+# esp32_improv:
+#   authorizer: none
 
-improv_serial:
+# improv_serial:
 
 # FutureProofHomes custom components - required for XMOS, DACs, duplex I2S, etc.
 external_components:
+  # Local override: fixes copy-paste bug in I2SAudioIn::stop_i2s_channel_() where
+  # i2s_channel_disable was called with tx_handle_ instead of rx_handle_, causing
+  # ESP_ERR_INVALID_STATE loop on every microphone start attempt.
+  - source:
+      type: local
+      path: local_components
+    components:
+      - i2s_audio
   - source:
       type: git
       url: https://github.com/FutureProofHomes/Satellite1-ESPHome
@@ -238,7 +236,6 @@ external_components:
     components:
       - audio
       - fusb302b
-      - i2s_audio
       - memory_flasher
       - micro_wake_word
       - mixer
@@ -290,6 +287,9 @@ satellite1:
   xmos_rst_pin: GPIO4
   on_xmos_no_response:
     then:
+      - logger.log:
+          level: INFO
+          format: "XMOS: not responding"
       - text_sensor.template.publish:
           id: xmos_firmware_version_text
           state: !lambda 'return id(satellite1_id).status_string();'
@@ -303,6 +303,9 @@ satellite1:
             - memory_flasher.write_embedded_image:
   on_xmos_connected:
     then:
+      - logger.log:
+          level: INFO
+          format: "XMOS: connected"
       - text_sensor.template.publish:
           id: xmos_firmware_version_text
           state: !lambda 'return id(satellite1_id).status_string();'
@@ -323,10 +326,6 @@ satellite1:
             lambda: return id(init_in_progress);
           then:
             - lambda: id(init_in_progress) = false;
-            - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
-            - script.execute: configure_selected_wake_word
-            - micro_wake_word.start:
-            - script.execute: control_leds
 
 # Embeds the XMOS firmware binary into flash; flashes it on boot if version mismatches
 memory_flasher:
@@ -338,6 +337,9 @@ memory_flasher:
       md5_file: https://raw.githubusercontent.com/FutureProofHomes/Documentation/refs/heads/main/assets/firmware/xmos/${xmos_fw_version}/satellite1_firmware_fixed_delay.factory.md5
     on_flashing_start:
       then:
+        - logger.log:
+            level: INFO
+            format: "XMOS: firmware flash started"
         - lambda: id(xmos_flashing_state) = 1;
         - script.execute: control_leds
     on_progress_update:
@@ -346,6 +348,9 @@ memory_flasher:
         - script.execute: control_leds
     on_flashing_success:
       then:
+        - logger.log:
+            level: INFO
+            format: "XMOS: firmware flash succeeded"
         - lambda: id(xmos_flashing_state) = 2;
         - script.execute: control_leds
         - lambda: id(xmos_flashing_state) = 0;
@@ -363,6 +368,9 @@ memory_flasher:
         - lambda: id(tas2780_active) = true;
     on_flashing_failed:
       then:
+        - logger.log:
+            level: INFO
+            format: "XMOS: firmware flash FAILED"
         - lambda: id(xmos_flashing_state) = 3;
         - script.execute: control_leds
         - lambda: id(xmos_flashing_state) = 0;
@@ -409,6 +417,10 @@ fusb302b:
   request_voltage: 20
   on_power_ready:
     then:
+      - logger.log:
+          level: INFO
+          format: "USB-C PD: contract ready, %dV"
+          args: ['id(pd_fusb302b).contract_voltage']
       - text_sensor.template.publish:
           id: pd_state_text
           state: !lambda 'return id(pd_fusb302b).contract;'
@@ -578,15 +590,17 @@ micro_wake_word:
     gain_factor: 6
   stop_after_detection: false
   models:
-    - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+    - model: wake_models/hey_jarvis_large/manifest.json
+      id: hey_jarvis
+      probability_cutoff: 0.69
+    - model: wake_models/okay_nabu_large/manifest.json
       id: okay_nabu
-    - model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
-      id: stop
-      internal: true
-  vad:
-    probability_cutoff: 0.85
-    sliding_window_size: 1
+      probability_cutoff: 0.69
   on_wake_word_detected:
+    - logger.log:
+        level: INFO
+        format: "Wake word detected: %s"
+        args: ['wake_word.c_str()']
     - if:
         condition:
           switch.is_off: master_mute_switch
@@ -632,9 +646,9 @@ voice_assistant:
   auto_gain: 0 dbfs
   volume_multiplier: 1
   on_client_connected:
-    - wait_until:
-        not:
-          ble.enabled
+    - logger.log:
+        level: INFO
+        format: "VA: client connected"
     - wait_until:
         not:
           memory_flasher.in_progress
@@ -643,17 +657,20 @@ voice_assistant:
     - lambda: |-
         // Local media_player is currently disabled.
         (void) id(speaker_volume).state;
-    - script.execute: configure_selected_wake_word
-    - micro_wake_word.start:
-    - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
-    - script.execute: control_leds
+    - script.execute: start_wake_word_if_ready
   on_client_disconnected:
+    - logger.log:
+        level: INFO
+        format: "VA: client disconnected"
     - voice_assistant.stop:
-    - script.execute: configure_selected_wake_word
-    - micro_wake_word.start:
-    - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - micro_wake_word.stop:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};
     - script.execute: control_leds
   on_error:
+    - logger.log:
+        level: INFO
+        format: "VA: error code=%s"
+        args: ['code.c_str()']
     - lambda: id(follow_up_armed) = false;
     - lambda: id(follow_up_active) = false;
     - if:
@@ -674,6 +691,9 @@ voice_assistant:
               priority: true
               sound_file: !lambda return id(error_cloud_expired_sound);
   on_start:
+    - logger.log:
+        level: DEBUG
+        format: "VA: started"
     - mixer_speaker.apply_ducking:
         id: media_mixing_input
         decibel_reduction: ${audio_decibel_reduction}
@@ -682,17 +702,25 @@ voice_assistant:
         condition:
           lambda: return !id(ptt_button_hold_active);
         then:
-          - micro_wake_word.enable_model: stop
           - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
           - script.execute: control_leds
           - script.execute: force_stop_wake_word_capture
   on_listening:
+    - logger.log:
+        level: DEBUG
+        format: "VA: listening"
     - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
     - script.execute: control_leds
   on_stt_vad_start:
+    - logger.log:
+        level: DEBUG
+        format: "VA: STT VAD start (command detected)"
     - lambda: id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
     - script.execute: control_leds
   on_stt_vad_end:
+    - logger.log:
+        level: DEBUG
+        format: "VA: STT VAD end (command recorded)"
     - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
     - script.execute: control_leds
     - script.stop: force_stop_wake_word_capture
@@ -712,6 +740,9 @@ voice_assistant:
           - script.execute: control_leds
           - script.execute: activate_stop_word_once
   on_tts_start:
+    - logger.log:
+        level: DEBUG
+        format: "VA: TTS starting"
     - if:
         condition:
           lambda: 'return id(voice_assistant_phase) != ${voice_assist_replying_phase_id};'
@@ -732,6 +763,9 @@ voice_assistant:
               // Local media_player is currently disabled.
               (void) id(speaker_volume).state;
   on_end:
+    - logger.log:
+        level: DEBUG
+        format: "VA: ended"
     - wait_until:
         not:
           voice_assistant.is_running:
@@ -740,7 +774,7 @@ voice_assistant:
         condition:
           switch.is_off: timer_ringing
         then:
-          - micro_wake_word.disable_model: stop
+          - script.execute: start_wake_word_if_ready
     - mixer_speaker.apply_ducking:
         id: media_mixing_input
         decibel_reduction: 0
@@ -1347,6 +1381,9 @@ binary_sensor:
           condition:
             binary_sensor.is_off: hardware_mute_switch
           then:
+            - logger.log:
+                level: INFO
+                format: "HW mute switch: OFF (unmuted)"
             - script.execute:
                 id: play_sound
                 priority: false
@@ -1355,6 +1392,9 @@ binary_sensor:
                 id: master_mute_switch
                 state: OFF
           else:
+            - logger.log:
+                level: INFO
+                format: "HW mute switch: ON (muted)"
             - script.execute:
                 id: play_sound
                 priority: false
@@ -1376,6 +1416,9 @@ binary_sensor:
       - delayed_on: 200ms
       - delayed_off: 200ms
     on_press:
+      - logger.log:
+          level: INFO
+          format: "Jack: plugged in (line-out active)"
       - dac_proxy.activate_line_out:
       - lambda: id(jack_plugged_recently) = true;
       - script.execute: control_leds
@@ -1388,6 +1431,9 @@ binary_sensor:
       - lambda: id(jack_plugged_recently) = false;
       - script.execute: control_leds
     on_release:
+      - logger.log:
+          level: INFO
+          format: "Jack: unplugged (speaker active)"
       - dac_proxy.activate_speaker:
       - lambda: id(jack_unplugged_recently) = true;
       - script.execute: control_leds
@@ -1585,12 +1631,45 @@ switch:
     restore_mode: RESTORE_DEFAULT_ON
 
   - platform: template
+    id: debug_logging_switch
+    name: "Debug Logging"
+    icon: "mdi:bug-check"
+    entity_category: diagnostic
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - logger.log:
+          level: INFO
+          format: "Debug logging: ENABLED"
+      - logger.set_level:
+          level: DEBUG
+          tag: "micro_wake_word"
+      - logger.set_level:
+          level: DEBUG
+          tag: "api"
+      - logger.set_level:
+          level: DEBUG
+          tag: "voice_assistant"
+    on_turn_off:
+      - logger.log:
+          level: INFO
+          format: "Debug logging: DISABLED"
+      - logger.set_level:
+          level: ERROR
+          tag: "micro_wake_word"
+      - logger.set_level:
+          level: WARN
+          tag: "api"
+      - logger.set_level:
+          level: WARN
+          tag: "voice_assistant"
+
+  - platform: template
     id: timer_ringing
     optimistic: true
     internal: true
     restore_mode: ALWAYS_OFF
     on_turn_off:
-      - micro_wake_word.disable_model: stop
       - script.stop: ring_timer
       - mixer_speaker.apply_ducking:
           id: media_mixing_input
@@ -1602,7 +1681,6 @@ switch:
           id: media_mixing_input
           decibel_reduction: ${audio_decibel_reduction}
           duration: 0.0s
-      - micro_wake_word.enable_model: stop
       - script.execute: ring_timer
       - script.execute: control_leds
       - delay: 15min
@@ -1617,12 +1695,12 @@ select:
     id: wake_word_choice
     name: "Wake Word"
     optimistic: true
-    initial_option: Hey Jarvis
+    initial_option: Okay Nabu
     restore_value: true
     entity_category: config
     options:
-      - Hey Jarvis
       - Okay Nabu
+      - Hey Jarvis
     on_value:
       - script.execute: configure_selected_wake_word
 
@@ -1902,23 +1980,66 @@ globals:
 # ============================================================================
 
 script:
+  - id: start_wake_word_if_ready
+    mode: restart
+    then:
+      - delay: 350ms
+      - if:
+          condition:
+            and:
+              - lambda: return !id(init_in_progress);
+              - wifi.connected:
+              - not:
+                  memory_flasher.in_progress:
+              - switch.is_off: master_mute_switch
+          then:
+            - logger.log:
+                level: INFO
+                format: "Wake word: starting (init=%d muted=%d)"
+                args: ['(int)id(init_in_progress)', '(int)id(master_mute_switch).state']
+            - script.execute: configure_selected_wake_word
+            - micro_wake_word.start:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+          else:
+            - logger.log:
+                level: DEBUG
+                format: "Wake word: not ready (init=%d wifi=%d muted=%d)"
+                args: ['(int)id(init_in_progress)', '(int)id(wifi_id).is_connected()', '(int)id(master_mute_switch).state']
+      - script.execute: control_leds
+
   - id: configure_selected_wake_word
     then:
+      - micro_wake_word.disable_model: hey_jarvis
       - micro_wake_word.disable_model: okay_nabu
-      - micro_wake_word.disable_model: stop
-      - micro_wake_word.enable_model: okay_nabu
-      - micro_wake_word.enable_model: stop
+      - if:
+          condition:
+            lambda: return id(wake_word_choice).current_option() == "Okay Nabu";
+          then:
+            - micro_wake_word.enable_model: okay_nabu
+          else:
+            - micro_wake_word.enable_model: hey_jarvis
       - lambda: |-
-          const bool use_okay_nabu = id(wake_word_choice).current_option() == "Okay Nabu";
           const std::string sensitivity = id(wake_word_sensitivity).current_option().str();
+          const bool use_okay_nabu = id(wake_word_choice).current_option() == "Okay Nabu";
           if (sensitivity == "Slightly sensitive") {
-            id(okay_nabu).set_probability_cutoff(217);
+            if (use_okay_nabu) {
+              id(okay_nabu).set_probability_cutoff(217);
+            } else {
+              id(hey_jarvis).set_probability_cutoff(217);
+            }
           } else if (sensitivity == "Moderately sensitive") {
-            id(okay_nabu).set_probability_cutoff(176);
+            if (use_okay_nabu) {
+              id(okay_nabu).set_probability_cutoff(176);
+            } else {
+              id(hey_jarvis).set_probability_cutoff(176);
+            }
           } else {
-            id(okay_nabu).set_probability_cutoff(143);
+            if (use_okay_nabu) {
+              id(okay_nabu).set_probability_cutoff(143);
+            } else {
+              id(hey_jarvis).set_probability_cutoff(143);
+            }
           }
-          id(stop).set_probability_cutoff(use_okay_nabu ? 143 : 160);
 
   - id: follow_up_listen
     mode: single
@@ -2030,12 +2151,12 @@ script:
             id(control_leds_voice_assistant_replying_phase).execute();
           } else if (id(voice_assistant_phase) == ${voice_assist_error_phase_id}) {
             id(control_leds_voice_assistant_error_phase).execute();
+          } else if (id(master_mute_switch).state || id(warning)) {
+            id(control_leds_muted_or_silent).execute();
           } else if (id(voice_assistant_phase) == ${voice_assist_not_ready_phase_id}) {
             id(control_leds_voice_assistant_not_ready_phase).execute();
           } else if (id(is_timer_active)) {
             id(control_leds_timer_ticking).execute();
-          } else if (id(master_mute_switch).state || id(warning)) {
-            id(control_leds_muted_or_silent).execute();
           } else if (id(dac_proxy).volume() == 0.0f || id(dac_proxy).is_muted()) {
             id(control_leds_muted_or_silent).execute();
           } else if (id(voice_assistant_phase) == ${voice_assist_idle_phase_id}) {
@@ -2420,19 +2541,8 @@ script:
 
   - id: activate_stop_word_once
     then:
-      # Media player state monitoring disabled - no media player configured
+      # Stop-model disabled to keep wake-word memory footprint low.
       - delay: 1s
-      - if:
-          condition:
-            switch.is_off: timer_ringing
-          then:
-            - micro_wake_word.enable_model: stop
-            - delay: 5s
-            - if:
-                condition:
-                  switch.is_off: timer_ringing
-                then:
-                  - micro_wake_word.disable_model: stop
 
 interval:
   - interval: 30s

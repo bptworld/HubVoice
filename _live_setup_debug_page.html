@@ -1,0 +1,440 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>HubVoiceSat Debug</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; background:#0f1114; color:#f5f5f5; margin:0; }
+    .wrap { max-width: 1160px; margin: 0 auto; padding: 24px; }
+    .top { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+    .card { background:#171a1f; border:1px solid #2d3440; border-radius:12px; padding:16px; margin-top:14px; }
+    h1, h2 { margin:0 0 10px; }
+    .muted { color:#a7b0be; }
+    .mono { font-family: Consolas, monospace; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:10px; }
+    .kv { background:#11141a; border:1px solid #343d4c; border-radius:8px; padding:10px; }
+    .kv .k { color:#90a0b7; font-size:12px; margin-bottom:4px; }
+    .kv .v { word-break:break-all; }
+    button { background:#2b72d6; color:#fff; border:none; border-radius:8px; padding:10px 14px; cursor:pointer; }
+    button.alt { background:#3f4756; }
+    pre { margin:0; white-space:pre-wrap; word-break:break-word; font-size:12px; line-height:1.35; color:#d6deeb; }
+    .status-ok { color:#66d18f; }
+    .status-bad { color:#ff7c7c; }
+    .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .badge-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:10px; }
+    .badge-card { background:#11141a; border:1px solid #343d4c; border-radius:8px; padding:10px; }
+    .badge-title { font-size:12px; color:#90a0b7; margin-bottom:8px; }
+    .badge-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .badge-pill { border-radius:999px; padding:2px 8px; font-size:11px; font-weight:600; letter-spacing:.02em; }
+    .badge-ready { background:#1a3b2a; color:#87f2b1; border:1px solid #2a6c43; }
+    .badge-warn { background:#3d1f1f; color:#ffabab; border:1px solid #7a3838; }
+    .small-note { font-size:11px; color:#b2bccb; margin-top:6px; word-break:break-word; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <h1>HubVoiceSat Debug</h1>
+        <p id="stamp" class="muted mono" style="margin:4px 0 0;">Generated: ...</p>
+      </div>
+      <div class="toolbar">
+        <label class="muted" style="display:flex;align-items:center;gap:8px;">
+          <input id="auto_refresh" type="checkbox" checked style="width:auto;">
+          Auto refresh
+        </label>
+        <button onclick="refreshNow()">Refresh</button>
+        <button onclick="downloadDiagnostics()">Download Diagnostics</button>
+        <button class="alt" onclick="window.location.href='/'">Back to Setup</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Quick Facts</h2>
+      <div class="grid" id="facts"></div>
+    </div>
+
+    <div class="card">
+      <h2>Runtime Endpoints</h2>
+      <div class="grid" id="runtime_endpoints"></div>
+    </div>
+
+    <div class="card">
+      <h2>Runtime Summary</h2>
+      <div class="grid" id="runtime_summary"></div>
+    </div>
+
+    <div class="card">
+      <h2>Satellite Readiness</h2>
+      <div class="badge-grid" id="satellite_readiness"></div>
+    </div>
+
+    <div class="card">
+      <h2>Startup Timing</h2>
+      <div class="grid" id="startup_summary"></div>
+      <div style="margin-top:10px;">
+        <pre id="startup_json">{}</pre>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Process Snapshot</h2>
+      <div class="grid" id="process_summary"></div>
+      <div style="margin-top:10px;">
+        <pre id="process_details">{}</pre>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Status Snapshot (/api/status)</h2>
+      <pre id="status_json">{}</pre>
+    </div>
+
+    <div class="card">
+      <h2>Runtime Health (/health)</h2>
+      <pre id="health_json">{}</pre>
+    </div>
+
+    <div class="card">
+      <h2>Runtime Satellites (/satellites)</h2>
+      <pre id="satellites_json">{}</pre>
+    </div>
+  </div>
+
+  <script>
+    let timer = null;
+    let lastSnapshot = null;
+
+    function esc(v) {
+      return String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function setJson(id, value) {
+      document.getElementById(id).textContent = JSON.stringify(value ?? {}, null, 2);
+    }
+
+    function kv(key, value) {
+      return `<div class="kv"><div class="k">${esc(key)}</div><div class="v mono">${esc(value)}</div></div>`;
+    }
+
+    function renderFacts(data) {
+      const state = data.state || {};
+      const runtimeHealthPayload = (data.runtime_health && data.runtime_health.data) || {};
+      const launcherVersion = (state.launcher_version && state.launcher_version !== 'not_found' && state.launcher_version !== 'unknown')
+        ? state.launcher_version
+        : (runtimeHealthPayload.launcher_version || state.launcher_version || 'unknown');
+      const launcherPath = (state.launcher_path && state.launcher_path !== 'not_found')
+        ? state.launcher_path
+        : (runtimeHealthPayload.launcher_path || state.launcher_path || 'unknown');
+      const processData = data.processes || {};
+      const facts = [
+        ['Launcher Version', launcherVersion],
+        ['Launcher Path', launcherPath],
+        ['Setup URL', data.setup_url || 'unknown'],
+        ['Setup Root', data.setup_root || 'unknown'],
+        ['Firmware Target', state.firmware_target_version || 'unknown'],
+        ['Setup Schema', data.setup_schema_version || 'unknown'],
+        ['Runtime State Dir', state.runtime_state_dir || 'unknown'],
+        ['Runtime Config Path', state.runtime_config_path || 'unknown'],
+        ['Runtime Satellites Path', state.runtime_satellites_path || 'unknown'],
+        ['Setup Page Path', data.setup_page_path || 'unknown'],
+        ['Debug Page Path', data.debug_page_path || 'unknown'],
+        ['Setup-Web Processes', (processData.setup_web || []).length],
+        ['Launcher Processes', (processData.launcher_exe || []).length],
+        ['Runtime Processes', (processData.runtime_exe || []).length]
+      ];
+      document.getElementById('facts').innerHTML = facts.map(([k, v]) => kv(k, v)).join('');
+    }
+
+    function renderRuntimeEndpoints(data) {
+      const health = data.runtime_health || {};
+      const satellites = data.runtime_satellites || {};
+
+      const rows = [
+        kv('Health Endpoint', `${health.target || 'n/a'} | ${health.ok ? 'OK' : 'ERROR'}`),
+        kv('Health Result', health.ok ? 'Reachable' : (health.error || 'Unavailable')),
+        kv('Satellites Endpoint', `${satellites.target || 'n/a'} | ${satellites.ok ? 'OK' : 'ERROR'}`),
+        kv('Satellites Result', satellites.ok ? 'Reachable' : (satellites.error || 'Unavailable'))
+      ];
+
+      document.getElementById('runtime_endpoints').innerHTML = rows.join('');
+    }
+
+    function renderRuntimeSummary(data) {
+      const payload = (data.runtime_health && data.runtime_health.data) || {};
+      const bridges = payload.voice_assistant || {};
+      const bridgeEntries = Object.entries(bridges);
+      let connected = 0;
+      let reconnecting = 0;
+      let errors = 0;
+
+      for (const [, bridge] of bridgeEntries) {
+        if (bridge && bridge.connected) {
+          connected += 1;
+        }
+        const status = String((bridge && bridge.status) || '').toLowerCase();
+        if (status === 'reconnecting' || status === 'connecting') {
+          reconnecting += 1;
+        }
+        if ((bridge && bridge.last_error) || status === 'error') {
+          errors += 1;
+        }
+      }
+
+      const rows = [
+        kv('Runtime Reachable', data.runtime_health && data.runtime_health.ok ? 'Yes' : 'No'),
+        kv('Bridge Count', bridgeEntries.length),
+        kv('Connected Bridges', connected),
+        kv('Reconnecting Bridges', reconnecting),
+        kv('Bridge Errors', errors),
+        kv('Queue Depth', payload.queue_depth ?? 'unknown')
+      ];
+
+      if (bridgeEntries.length) {
+        for (const [satelliteId, bridge] of bridgeEntries) {
+          const status = `${bridge.connected ? 'connected' : 'disconnected'} / ${bridge.status || 'unknown'}`;
+          const extra = bridge.last_error ? ` | ${bridge.last_error}` : '';
+          rows.push(kv(`Bridge ${satelliteId}`, `${status}${extra}`));
+        }
+      }
+
+      document.getElementById('runtime_summary').innerHTML = rows.join('');
+    }
+
+    function formatElapsedHms(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0) return 'not exposed by runtime';
+      const total = Math.floor(n);
+      const h = String(Math.floor(total / 3600)).padStart(2, '0');
+      const m = String(Math.floor((total % 3600) / 60)).padStart(2, '0');
+      const s = String(total % 60).padStart(2, '0');
+      return `${h}:${m}:${s}`;
+    }
+
+    function formatTimestampForDisplay(value) {
+      const raw = String(value || '').trim();
+      if (!raw) return 'not exposed by runtime';
+      const d = new Date(raw);
+      if (Number.isNaN(d.getTime())) return raw;
+      const local = d.toLocaleString();
+      return `${local} (local)`;
+    }
+
+    function renderStartupTiming(data) {
+      const payload = (data.runtime_health && data.runtime_health.data) || {};
+      const hasTiming = !!payload.startup_timing;
+      const timing = payload.startup_timing || {};
+      const bridges = payload.voice_assistant || {};
+      const bridgeEntries = Object.entries(bridges);
+      const connectedCount = bridgeEntries.filter(([, bridge]) => bridge && bridge.connected).length;
+      const derivedReady = bridgeEntries.length > 0 && connectedCount > 0;
+      const milestones = Array.isArray(timing.milestones) ? timing.milestones : [];
+      const latest = milestones.length ? milestones[milestones.length - 1] : null;
+      const rows = [
+        kv('Started At', formatTimestampForDisplay(timing.started_at)),
+        kv('Elapsed Seconds', (timing.elapsed_seconds != null) ? formatElapsedHms(timing.elapsed_seconds) : 'not exposed by runtime'),
+        kv('Runtime Ready', hasTiming ? (timing.ready ? 'Yes' : 'No') : (derivedReady ? 'Yes (derived from connected bridges)' : 'No (derived from bridge status)')),
+        kv('Milestone Count', hasTiming ? milestones.length : 'not exposed by runtime'),
+        kv('Latest Milestone', hasTiming ? (latest ? `${latest.name} @ ${latest.elapsed_seconds}s` : 'none') : 'not exposed by runtime')
+      ];
+      document.getElementById('startup_summary').innerHTML = rows.join('');
+      setJson('startup_json', hasTiming ? timing : {
+        info: 'startup_timing is not present in runtime /health payload',
+        derived_runtime_ready: derivedReady,
+        bridge_count: bridgeEntries.length,
+        connected_bridges: connectedCount
+      });
+    }
+
+    function renderSatelliteReadiness(data) {
+      const satPayload = (data.runtime_satellites && data.runtime_satellites.data) || {};
+      const healthPayload = (data.runtime_health && data.runtime_health.data) || {};
+      const voiceAssistant = healthPayload.voice_assistant || {};
+      const satellites = Array.isArray(satPayload.satellites) ? satPayload.satellites : [];
+      const host = document.getElementById('satellite_readiness');
+
+      if (!satellites.length) {
+        host.innerHTML = `<div class="badge-card"><div class="badge-title">No satellites reported</div><div class="small-note">Runtime /satellites endpoint returned no items.</div></div>`;
+        return;
+      }
+
+      // Nearest-speaker banner
+      const las = satPayload.last_active_speaker;
+      let speakerBanner = '';
+      if (las && las.satellite_id) {
+        const ageStr = las.age_secs != null ? `${las.age_secs}s ago` : '';
+        const label = las.alias || las.satellite_id;
+        speakerBanner = `
+          <div class="badge-card" style="border-color:#2a7d4f;margin-bottom:6px;">
+            <div class="badge-title" style="color:#5ce6a0;">&#x1F3A4; Last Active Speaker</div>
+            <div class="badge-row">
+              <span class="badge-pill badge-ready" style="background:#1a4a30;">${esc(label)}</span>
+              ${las.host ? `<span class="mono" style="font-size:11px;color:#9fb0c8;">${esc(las.host)}</span>` : ''}
+              ${ageStr ? `<span class="mono" style="font-size:11px;color:#9fb0c8;">${esc(ageStr)}</span>` : ''}
+            </div>
+          </div>`;
+      }
+
+      const cards = satellites.map((sat) => {
+        const bridgeFromHealth = voiceAssistant[sat.id] || voiceAssistant[sat.name] || {};
+        const bridge = sat.voice_bridge || bridgeFromHealth || {};
+        const hasExplicitReady = typeof sat.ready_for_voice === 'boolean';
+        const ready = hasExplicitReady ? !!sat.ready_for_voice : !!bridge.connected;
+        const status = String(bridge.status || 'unknown');
+        const connection = bridge.connected ? 'connected' : 'disconnected';
+        const pill = ready
+          ? '<span class="badge-pill badge-ready">ready for voice</span>'
+          : '<span class="badge-pill badge-warn">not ready</span>';
+        const label = sat.alias || sat.name || sat.id || sat.host || 'satellite';
+        const detail = bridge.last_error ? `error: ${bridge.last_error}` : `bridge: ${connection}/${status}`;
+        const isNearest = !!sat.is_last_active_speaker;
+        const wakeStr = (sat.last_wake_ago_secs != null)
+          ? `last wake: ${sat.last_wake_ago_secs}s ago`
+          : 'last wake: not exposed by runtime';
+        const wakePhrase = String(sat.last_wake_phrase || bridge.last_wake_phrase || '').trim();
+        const wakePhraseStr = wakePhrase
+          ? `last wake phrase: ${wakePhrase}`
+          : 'last wake phrase: not exposed by runtime';
+        const eventStr = bridge.last_event
+          ? `last bridge event: ${bridge.last_event}`
+          : 'last bridge event: unknown';
+        const nearestBadge = isNearest
+          ? ' <span class="badge-pill" style="background:#1a4a30;color:#5ce6a0;">&#x1F3A4; nearest</span>'
+          : '';
+
+        return `
+          <div class="badge-card"${isNearest ? ' style="border-color:#2a7d4f;"' : ''}>
+            <div class="badge-title mono">${esc(label)} (${esc(sat.host || sat.ip || 'n/a')})</div>
+            <div class="badge-row">
+              ${pill}${nearestBadge}
+              <span class="mono" style="font-size:11px;color:#9fb0c8;">reachable: ${sat.reachable ? 'yes' : 'no'}</span>
+            </div>
+            <div class="small-note mono">${esc(detail)}</div>
+            <div class="small-note mono" style="color:#6a7f96;">${esc(wakeStr)}</div>
+            <div class="small-note mono" style="color:#6a7f96;">${esc(wakePhraseStr)}</div>
+            <div class="small-note mono" style="color:#6a7f96;">${esc(eventStr)}</div>
+          </div>
+        `;
+      });
+
+      host.innerHTML = speakerBanner + cards.join('');
+    }
+
+    function renderProcessSnapshot(data) {
+      const p = data.processes || {};
+
+      function countProcessItems(value) {
+        if (Array.isArray(value)) return value.length;
+        if (!value) return 0;
+        if (typeof value === 'object') return 1;
+        return 0;
+      }
+
+      const setupWebCount = countProcessItems(p.setup_web);
+      const launcherCount = countProcessItems(p.launcher_exe);
+      const runtimeCount = countProcessItems(p.runtime_exe);
+
+      const summary = [
+        kv('Setup-Web Processes', setupWebCount),
+        kv('Launcher EXE Processes', launcherCount),
+        kv('Runtime EXE Processes', runtimeCount)
+      ];
+      document.getElementById('process_summary').innerHTML = summary.join('');
+      setJson('process_details', p);
+    }
+
+    function buildTimestampForFile(isoString) {
+      const d = isoString ? new Date(isoString) : new Date();
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      const hour = String(d.getHours()).padStart(2, '0');
+      const minute = String(d.getMinutes()).padStart(2, '0');
+      const second = String(d.getSeconds()).padStart(2, '0');
+      return `${year}${month}${day}-${hour}${minute}${second}`;
+    }
+
+    async function downloadDiagnostics() {
+      let payloadObject = null;
+
+      try {
+        const res = await fetch('/api/support_bundle');
+        if (res.ok) {
+          payloadObject = await res.json();
+        }
+      } catch (_) {
+      }
+
+      if (!payloadObject) {
+        if (!lastSnapshot) {
+          await refreshNow();
+        }
+        if (!lastSnapshot) {
+          return;
+        }
+        payloadObject = {
+          bundle_version: 'fallback-1',
+          generated_at: new Date().toISOString(),
+          setup_snapshot: lastSnapshot,
+          notes: ['Support bundle endpoint unavailable; this is a fallback snapshot export.']
+        };
+      }
+
+      const stamp = buildTimestampForFile(payloadObject.generated_at || new Date().toISOString());
+      const fileName = `hubvoicesat-support-bundle-${stamp}.json`;
+      const payload = JSON.stringify(payloadObject, null, 2);
+      const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
+
+    async function refreshNow() {
+      try {
+        const res = await fetch('/api/debug_snapshot');
+        const data = await res.json();
+        lastSnapshot = data;
+
+        document.getElementById('stamp').textContent = `Generated: ${data.generated_at || 'unknown'}`;
+        renderFacts(data);
+        renderRuntimeEndpoints(data);
+        renderRuntimeSummary(data);
+        renderSatelliteReadiness(data);
+        renderStartupTiming(data);
+        renderProcessSnapshot(data);
+
+        setJson('status_json', data.status || {});
+        setJson('health_json', data.runtime_health || {});
+        setJson('satellites_json', data.runtime_satellites || {});
+      } catch (err) {
+        document.getElementById('stamp').textContent = `Generated: error (${err.message || err})`;
+      }
+    }
+
+    function scheduleRefresh() {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      if (document.getElementById('auto_refresh').checked) {
+        timer = setInterval(refreshNow, 10000);
+      }
+    }
+
+    document.getElementById('auto_refresh').addEventListener('change', scheduleRefresh);
+    refreshNow();
+    scheduleRefresh();
+  </script>
+</body>
+</html>
